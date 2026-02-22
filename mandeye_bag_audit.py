@@ -50,6 +50,7 @@ import numpy as np
 
 try:
     from rosbags.rosbag1 import Reader as Reader1
+    from rosbags.rosbag1.reader import ReaderError as Reader1Error
     from rosbags.rosbag2 import Reader as Reader2
     from rosbags.typesys import Stores, get_typestore
 except ImportError:
@@ -300,6 +301,7 @@ class TopicStats:
     dt_std: float = 0.0
     monotone: bool = True
     dominant_frame_id: str = ""
+    notes: List[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +366,9 @@ def _sample_bag(bag_path: Path, max_msgs: int, is_ros1: bool) -> Dict[str, Topic
     pc2_ts_checked: Dict[str, bool] = {}   # topic → already checked data buffer?
 
     # Second pass: sample messages
+    truncated = False
     with ReaderCls(bag_path) as reader:
+      try:
         for conn, _timestamp, rawdata in reader.messages():
             if conn.topic not in relevant:
                 continue
@@ -484,6 +488,17 @@ def _sample_bag(bag_path: Path, max_msgs: int, is_ros1: bool) -> Dict[str, Topic
                                     stats.per_point_ts_verified = False
                     except Exception:
                         pass
+
+      except (Reader1Error, Exception) as exc:
+          truncated = True
+          print(f"WARNING: Bag file read error (truncated/corrupt?): {exc}",
+                file=sys.stderr)
+          print("         Continuing with data read so far ...", file=sys.stderr)
+
+    if truncated:
+        # Mark all topics so the report can flag it
+        for stats in relevant.values():
+            stats.notes.append("BAG FILE TRUNCATED – partial data only")
 
     # ---- Post-sampling derivations ----
     for stats in relevant.values():
@@ -1234,6 +1249,9 @@ def print_report(
                 )
             if s.field_names:
                 print(f"        PC2 fields:  {', '.join(s.field_names)}")
+            if s.notes:
+                for note in s.notes:
+                    print(f"        \033[93mNOTE: {note}\033[0m")
 
     # ---- Deserialization warnings ----
     warn_topics = [

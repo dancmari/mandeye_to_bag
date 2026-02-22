@@ -17,7 +17,7 @@ Dependencies (pip install):
   numpy
 
 Usage:
-  python mandeye_convert.py <input> <output> <mode> [options]
+  python mandeye_bag_convert.py <input> <output> <mode> [options]
 
 Options:
   --lines <N>             Number of lidar scan lines (default: 8)
@@ -48,6 +48,7 @@ except ImportError:
 
 try:
     from rosbags.rosbag1 import Reader as Reader1, Writer as Writer1
+    from rosbags.rosbag1.reader import ReaderError as Reader1Error
     from rosbags.rosbag2 import Reader as Reader2, Writer as Writer2
     from rosbags.typesys import Stores, get_typestore
 except ImportError:
@@ -590,6 +591,7 @@ def ros1_to_hdmapping(
             last_header_ts = 0.0
             start_ts = 0.0
             with Reader1(bag_path) as reader:
+              try:
                 for conn, timestamp, rawdata in reader.messages():
                     if conn.topic == pc_topic:
                         msg = _deserialize_ros1_safe(rawdata, conn.msgtype)
@@ -603,6 +605,11 @@ def ros1_to_hdmapping(
                             if ts - start_ts > 20.0:
                                 break
                         last_header_ts = ts
+              except (Reader1Error, Exception) as exc:
+                print(f"  WARNING: Bag read error (truncated/corrupt?): {exc}",
+                      file=sys.stderr)
+                print("           Continuing with data read so far ...",
+                      file=sys.stderr)
 
             if header_diffs:
                 lidar_frame_rate = sum(header_diffs) / len(header_diffs)
@@ -610,6 +617,7 @@ def ros1_to_hdmapping(
 
         # Pass 2: extract data
         with Reader1(bag_path) as reader:
+          try:
             for conn, timestamp, rawdata in reader.messages():
                 msg_time_sec = timestamp / 1e9
 
@@ -647,6 +655,11 @@ def ros1_to_hdmapping(
                     buffer_imu.clear()
                     last_save_ts = msg_time_sec
                     count += 1
+
+          except (Reader1Error, Exception) as exc:
+            print(f"  WARNING: Bag read error (truncated/corrupt?): {exc}",
+                  file=sys.stderr)
+            print("           Saving data read so far ...", file=sys.stderr)
 
     if buffer_pc or buffer_imu:
         _save_chunk(output_dir, count, buffer_pc, buffer_imu,
@@ -692,6 +705,7 @@ def ros2_to_hdmapping(
         last_header_ts = 0.0
         start_ts = 0.0
         with Reader2(input_bag) as reader:
+          try:
             for conn, timestamp, rawdata in reader.messages():
                 if conn.topic == pc_topic:
                     msg = deserialize_cdr(rawdata, conn.msgtype)
@@ -705,6 +719,11 @@ def ros2_to_hdmapping(
                         if ts - start_ts > 20.0:
                             break
                     last_header_ts = ts
+          except Exception as exc:
+            print(f"  WARNING: Bag read error (truncated/corrupt?): {exc}",
+                  file=sys.stderr)
+            print("           Continuing with data read so far ...",
+                  file=sys.stderr)
 
         if header_diffs:
             lidar_frame_rate = sum(header_diffs) / len(header_diffs)
@@ -712,6 +731,7 @@ def ros2_to_hdmapping(
 
     # Pass 2: extract data
     with Reader2(input_bag) as reader:
+      try:
         for conn, timestamp, rawdata in reader.messages():
             msg_time_sec = timestamp / 1e9
 
@@ -746,6 +766,11 @@ def ros2_to_hdmapping(
                 buffer_imu.clear()
                 last_save_ts = msg_time_sec
                 count += 1
+
+      except Exception as exc:
+        print(f"  WARNING: Bag read error (truncated/corrupt?): {exc}",
+              file=sys.stderr)
+        print("           Saving data read so far ...", file=sys.stderr)
 
     if buffer_pc or buffer_imu:
         _save_chunk(output_dir, count, buffer_pc, buffer_imu,
@@ -850,13 +875,13 @@ Modes:
   ros2-to-hdmapping   ROS2 bag folder -> MandEye folder
 
 Examples:
-  python mandeye_convert.py ./my_dataset ./output.bag hdmapping-to-ros1
-  python mandeye_convert.py ./output.bag ./extracted   ros1-to-hdmapping
-  python mandeye_convert.py ./my_dataset ./output_ros2 hdmapping-to-ros2
-  python mandeye_convert.py ./output_ros2 ./extracted  ros2-to-hdmapping
+  python mandeye_bag_convert.py ./my_dataset ./output.bag hdmapping-to-ros1
+  python mandeye_bag_convert.py ./output.bag ./extracted   ros1-to-hdmapping
+  python mandeye_bag_convert.py ./my_dataset ./output_ros2 hdmapping-to-ros2
+  python mandeye_bag_convert.py ./output_ros2 ./extracted  ros2-to-hdmapping
 
   # Auto-indexed output: export_git, export_git_000, export_git_001, …
-  python mandeye_convert.py deg-vis-1.bag export_git ros1-to-hdmapping
+  python mandeye_bag_convert.py deg-vis-1.bag export_git ros1-to-hdmapping
 """,
     )
     parser.add_argument("input", help="Input path (directory or bag file)")
