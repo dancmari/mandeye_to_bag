@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-mandeye_bag_audit.py  v0.6 — Enhanced bag auditor for HDMapping / MandEye.
+mandeye_bag_audit.py  v0.8 — Enhanced bag auditor for HDMapping / MandEye.
 
 Reads a ROS1 (.bag) or ROS2 bag, samples messages, and scores every possible
 (pointcloud_topic, imu_topic) pair against 7 weighted criteria.  Outputs a
@@ -15,10 +15,17 @@ Key capabilities:
   - C1/C2/C6 scoring uses overlapping time windows and full bag_time ranges
     instead of only sampled header.stamp windows
   - IMU unit autodetect (m/s² vs g vs mg vs mm/s², rad/s vs deg/s)
+    with scale factors exported to JSON for use by mandeye_bag_convert.py
   - Livox multi-timestamp analysis (header.stamp vs timebase vs offset_time)
   - PointCloud2 per-point timestamp data-buffer verification
   - Explicit deserialization error tracking (ok / fallback / fail per topic)
+  - Graceful handling of truncated/corrupt bag files (partial data recovery)
+  - Multi-volume / split bag sequence detection (--sequence / --no-sequence)
   - JSON export for pipeline integration with mandeye_bag_convert.py
+
+JSON export includes per-topic IMU unit info (acc_unit, acc_scale, gyro_unit,
+gyro_scale) which mandeye_bag_convert.py reads to skip auto-detection and
+apply correct conversion factors (output: Acc → g, Gyro → deg/s).
 
 Dependencies:  pip install rosbags numpy
 
@@ -28,16 +35,21 @@ Usage:
   python mandeye_bag_audit.py recording.bag --json audit.json
   python mandeye_bag_audit.py recording.bag --max_msgs 5000 --top 10
 
-Pipeline:
+Multi-volume sequences:
+  python mandeye_bag_audit.py recording_0.bag --sequence
+  python mandeye_bag_audit.py ./bag_directory/
+
+Pipeline (audit → convert with auto unit conversion):
   python mandeye_bag_audit.py  recording.bag --json audit.json
   python mandeye_bag_convert.py recording.bag output ros1-to-hdmapping --audit-json audit.json
-"""
+"""""
 
 from __future__ import annotations
 
 import argparse
 import json
 import math
+import re
 import struct
 import sys
 import textwrap
@@ -1380,6 +1392,127 @@ def print_report(
 
 
 # ============================================================================
+# BAG SEQUENCE DETECTION (multi-volume / split recordings)
+# ============================================================================
+
+def _extract_seq_prefix(stem: str) -> Tuple[str, Optional[int]]:
+    """Extract ``(prefix, index)`` from a bag filename stem.
+
+    Handles common rosbag-split naming conventions::
+
+        recording           -> ("recording", None)
+        recording_0         -> ("recording", 0)
+        recording_003       -> ("recording", 3)
+        rec_2022-01-01-12-00-00_0  -> ("rec", 0)
+    """
+    # prefix_DATETIME_INDEX
+    m = re.match(
+        r'^(.+?)_\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}_(\d+)$', stem,
+    )
+    if m:
+        return m.group(1), int(m.group(2))
+    # prefix_INDEX
+    m = re.match(r'^(.+?)_(\d+)$', stem)
+    if m:
+        return m.group(1), int(m.group(2))
+    # no index
+    return stem, None
+
+
+def detect_bag_sequence(bag_path: Path) -> List[Path]:
+    """Find all ``.bag`` siblings that share the same recording prefix.
+
+    Returns a list sorted by sequence index.  Always contains at least
+    ``bag_path`` itself.  For non-``.bag`` inputs (e.g. ROS2 folders)
+    returns ``[bag_path]`` unchanged.
+    """
+    if bag_path.suffix != ".bag":
+        return [bag_path]
+
+    prefix, _ = _extract_seq_prefix(bag_path.stem)
+    parent = bag_path.parent
+
+    candidates: List[Tuple[int, Path]] = []
+    for f in sorted(parent.glob("*.bag")):
+        p, idx = _extract_seq_prefix(f.stem)
+        if p == prefix:
+            candidates.append((idx if idx is not None else -1, f))
+
+    if len(candidates) <= 1:
+        return [bag_path]
+
+    candidates.sort(key=lambda x: x[0])
+    return [p for _, p in candidates]
+
+
+@dataclass
+class SequenceInfo:
+    """Per-bag timing info within a multi-volume sequence."""
+    path: Path
+    start_ns: int
+    end_ns: int
+    duration_s: float
+    gap_from_prev_s: Optional[float] = None
+
+
+def validate_bag_sequence(bags: List[Path]) -> List[SequenceInfo]:
+    """Open each bag to read start/end times and compute inter-bag gaps.
+
+    Returns a list of :class:`SequenceInfo` sorted by start time.
+    """
+    infos: List[SequenceInfo] = []
+    for bag_path in bags:
+        try:
+            with Reader1(bag_path) as reader:
+                start = reader.start_time   # nanoseconds
+                end = reader.end_time
+                duration = (end - start) / 1e9
+                infos.append(SequenceInfo(
+                    path=bag_path,
+                    start_ns=start,
+                    end_ns=end,
+                    duration_s=duration,
+                ))
+        except Exception as exc:
+            print(f"  WARNING: Cannot read {bag_path.name}: {exc}",
+                  file=sys.stderr)
+
+    infos.sort(key=lambda x: x.start_ns)
+    for i in range(1, len(infos)):
+        infos[i].gap_from_prev_s = (
+            infos[i].start_ns - infos[i - 1].end_ns
+        ) / 1e9
+
+    return infos
+
+
+def _print_sequence_summary(
+    seq_infos: List[SequenceInfo],
+) -> None:
+    """Print a human-readable sequence summary to stdout."""
+    total_dur = sum(si.duration_s for si in seq_infos)
+    total_start = seq_infos[0].start_ns / 1e9
+    total_end = seq_infos[-1].end_ns / 1e9
+
+    print(f"\n{'='*72}")
+    print(f"  SEQUENCE SUMMARY  ({len(seq_infos)} bags, "
+          f"total duration: {total_dur:.1f}s)")
+    print(f"{'='*72}")
+    for i, si in enumerate(seq_infos):
+        rel_start = (si.start_ns / 1e9) - total_start
+        rel_end = (si.end_ns / 1e9) - total_start
+        gap_str = ""
+        if si.gap_from_prev_s is not None:
+            g = si.gap_from_prev_s
+            ok = "✓" if abs(g) < 1.0 else ("⚠ overlap" if g < 0 else "⚠ gap")
+            gap_str = f"  gap: {g:.3f}s {ok}"
+        print(f"  [{i}] {si.path.name:40s}  "
+              f"[{rel_start:8.1f}s .. {rel_end:8.1f}s]  "
+              f"dur: {si.duration_s:7.1f}s{gap_str}")
+    print()
+
+
+# ============================================================================
 # CLI
 # ============================================================================
 def main():
@@ -1405,9 +1538,14 @@ def main():
         JSON output (--json):
           Writes a machine-readable file containing all topic stats, pair
           scores/notes, and a 'recommended' block with the best pair's
-          pointcloud_topic, imu_topic, clock, and offset.  This JSON can
-          be consumed by mandeye_bag_convert.py --audit-json to auto-set
-          topics without manual copy-paste.
+          pointcloud_topic, imu_topic, clock, and offset.  For IMU topics
+          the JSON also includes acc_unit, acc_scale, gyro_unit, gyro_scale
+          which mandeye_bag_convert.py reads (via --audit-json) to apply
+          correct unit conversion (output: Acc → g, Gyro → deg/s).
+
+        Truncated / corrupt bags:
+          If the bag file is truncated or corrupt, the tool recovers as
+          much data as possible and marks affected topics with a NOTE.
 
         Examples:
           python mandeye_bag_audit.py recording.bag
@@ -1416,12 +1554,25 @@ def main():
           python mandeye_bag_audit.py recording.bag --max_msgs 5000 --top 10
           python mandeye_bag_audit.py ros2_bag_folder/
 
-        Pipeline (audit → convert):
+        Pipeline (audit → convert with auto unit conversion):
           python mandeye_bag_audit.py  rec.bag --json audit.json
           python mandeye_bag_convert.py rec.bag out ros1-to-hdmapping --audit-json audit.json
+
+        Manual unit override (skip auto-detection):
+          python mandeye_bag_convert.py rec.bag out ros1-to-hdmapping --acc_unit g --gyro_unit deg/s
+
+        Multi-volume / split bags (--sequence):
+          Automatically detects sibling .bag files that belong to the same
+          recording (e.g. recording_0.bag, recording_1.bag, …).
+          Use --sequence to audit them all and get a combined summary.
+          Use --no-sequence to suppress detection and process a single file.
+          
+          python mandeye_bag_audit.py recording_0.bag --sequence
+          python mandeye_bag_audit.py ./recordings/ --sequence
         """),
     )
-    p.add_argument("bag", help="Path to ROS1 .bag file or ROS2 bag folder")
+    p.add_argument("bag", help="Path to ROS1 .bag file, ROS2 bag folder, "
+                   "or directory containing .bag files")
     p.add_argument("--max_msgs", type=int, default=2000,
                    help="Max messages to sample per topic (default: 2000)")
     p.add_argument("--top", type=int, default=5,
@@ -1430,9 +1581,30 @@ def main():
                    help="Show detailed per-criterion breakdown")
     p.add_argument("--json", metavar="FILE",
                    help="Write machine-readable audit results to a JSON file")
+    seq_grp = p.add_mutually_exclusive_group()
+    seq_grp.add_argument(
+        "--sequence", action="store_true", default=None,
+        help="Process all bags in the detected sequence (multi-volume)",
+    )
+    seq_grp.add_argument(
+        "--no-sequence", action="store_true",
+        help="Suppress sequence detection; process only the given file",
+    )
     args = p.parse_args()
 
     bag_path = Path(args.bag)
+
+    # --- Variant C: directory of .bag files ---
+    is_dir_of_bags = False
+    dir_bags: List[Path] = []
+    if bag_path.is_dir() and not any(bag_path.glob("metadata.yaml")):
+        # Not a ROS2 bag folder — check if it contains .bag files
+        dir_bags = sorted(bag_path.glob("*.bag"))
+        if dir_bags:
+            is_dir_of_bags = True
+            bag_path = dir_bags[0]  # use first as anchor
+            print(f"Directory contains {len(dir_bags)} .bag file(s)")
+
     is_ros1 = bag_path.suffix == ".bag"
 
     if is_ros1 and not bag_path.exists():
@@ -1440,31 +1612,65 @@ def main():
     if not is_ros1 and not bag_path.is_dir():
         sys.exit(f"ERROR: ROS2 bag folder not found: {bag_path}")
 
-    print(f"Sampling up to {args.max_msgs} messages per topic ...")
-    all_topics = _sample_bag(bag_path, args.max_msgs, is_ros1)
+    # --- Sequence detection (Variants A / B) ---
+    sequence: List[Path] = [bag_path]
+    seq_infos: List[SequenceInfo] = []
+    if is_ros1 and not args.no_sequence:
+        if is_dir_of_bags:
+            detected = dir_bags          # Variant C: all bags in directory
+        else:
+            detected = detect_bag_sequence(bag_path)  # Variant A/B: auto-detect
+        if len(detected) > 1:
+            seq_infos = validate_bag_sequence(detected)
+            _print_sequence_summary(seq_infos)
+            if args.sequence or is_dir_of_bags:
+                # Variant B or C: process all bags
+                sequence = detected
+                print(f"  Processing all {len(sequence)} bags in sequence.\n")
+            else:
+                # Variant A: inform only
+                print(f"  INFO: Detected {len(detected)} bags in sequence.")
+                print(f"         Use --sequence to audit them all.\n")
 
-    pc_topics = [
-        s for s in all_topics.values()
-        if _is_pc_type(s.msgtype) and s.header_timestamps
-    ]
-    imu_topics = [
-        s for s in all_topics.values()
-        if _is_imu_type(s.msgtype) and s.header_timestamps
-    ]
+    # --- Audit each bag ---
+    all_reports: List[Tuple[str, Dict[str, TopicStats], List[PairScore]]] = []
+    for bag_file in sequence:
+        label = bag_file.name if len(sequence) > 1 else str(bag_file)
+        if len(sequence) > 1:
+            print(f"\n{'─'*72}")
+            print(f"  Auditing: {bag_file.name}")
+            print(f"{'─'*72}")
 
-    print(f"Found {len(pc_topics)} PC topic(s), {len(imu_topics)} IMU topic(s)")
-    n_pairs = len(pc_topics) * len(imu_topics)
-    print(f"Evaluating {n_pairs} pair(s) ...")
+        cur_is_ros1 = bag_file.suffix == ".bag"
+        print(f"Sampling up to {args.max_msgs} messages per topic ...")
+        all_topics = _sample_bag(bag_file, args.max_msgs, cur_is_ros1)
 
-    pairs: List[PairScore] = []
-    for pc in pc_topics:
-        for imu in imu_topics:
-            pairs.append(score_pair(pc, imu))
+        pc_topics = [
+            s for s in all_topics.values()
+            if _is_pc_type(s.msgtype) and s.header_timestamps
+        ]
+        imu_topics = [
+            s for s in all_topics.values()
+            if _is_imu_type(s.msgtype) and s.header_timestamps
+        ]
 
-    print_report(str(bag_path), all_topics, pairs, args.top, args.verbose)
+        print(f"Found {len(pc_topics)} PC topic(s), {len(imu_topics)} IMU topic(s)")
+        n_pairs = len(pc_topics) * len(imu_topics)
+        print(f"Evaluating {n_pairs} pair(s) ...")
 
+        pairs: List[PairScore] = []
+        for pc in pc_topics:
+            for imu in imu_topics:
+                pairs.append(score_pair(pc, imu))
+
+        print_report(label, all_topics, pairs, args.top, args.verbose)
+        all_reports.append((str(bag_file), all_topics, pairs))
+
+    # --- JSON export (first / only bag, or combined) ---
     if args.json:
-        _write_json(args.json, str(bag_path), all_topics, pairs)
+        bag_label, topics, pairs = all_reports[0]
+        _write_json(args.json, bag_label, topics, pairs,
+                     seq_infos=seq_infos if len(sequence) > 1 else None)
 
 
 # ============================================================================
@@ -1539,6 +1745,7 @@ def _write_json(
     bag_path: str,
     all_topics: Dict[str, TopicStats],
     pairs: List[PairScore],
+    seq_infos: Optional[List[SequenceInfo]] = None,
 ) -> None:
     """Write the full audit results to a JSON file."""
     relevant = {
@@ -1547,8 +1754,8 @@ def _write_json(
     }
     pairs_sorted = sorted(pairs, key=lambda p: p.total, reverse=True)
 
-    data = {
-        "audit_version": "0.6",
+    data: Dict[str, Any] = {
+        "audit_version": "0.7",
         "bag": bag_path,
         "topics": [
             {"topic": s.topic, "msgtype": s.msgtype, "msgcount": s.msgcount}
@@ -1560,6 +1767,21 @@ def _write_json(
         ],
         "pairs": [_pair_to_dict(p) for p in pairs_sorted],
     }
+
+    # Add sequence info if present
+    if seq_infos and len(seq_infos) > 1:
+        data["sequence"] = [
+            {
+                "file": si.path.name,
+                "start_ns": si.start_ns,
+                "end_ns": si.end_ns,
+                "duration_s": round(si.duration_s, 3),
+                "gap_from_prev_s": (round(si.gap_from_prev_s, 6)
+                                    if si.gap_from_prev_s is not None
+                                    else None),
+            }
+            for si in seq_infos
+        ]
 
     # Add recommended convert command from best pair
     if pairs_sorted and pairs_sorted[0].total >= 0.30:
