@@ -323,7 +323,6 @@ def parse_custom_msg(msg) -> List[PointXYZIT]:
     timebase = msg.timebase  # nanoseconds
     for p in msg.points:
         ts_ns = timebase + p.offset_time
-        ts_sec = ts_ns / 1e9
         points.append(PointXYZIT(p.x, p.y, p.z, float(p.reflectivity), ts_ns))
     return points
 
@@ -523,11 +522,12 @@ def hdmapping_to_ros2(
 
 
 # ---------------------------------------------------------------------------
-# Mode: ROS1 bag -> hdmapping
+# Shared: bag -> hdmapping (unified ROS1 / ROS2 implementation)
 # ---------------------------------------------------------------------------
-def ros1_to_hdmapping(
-    input_bag: str,
+def _bag_to_hdmapping(
+    input_path: str,
     output_dir: str,
+    is_ros1: bool,
     pc_topic: str = "/livox/lidar",
     imu_topic: str = "/livox/imu",
     chunk_len: float = 20.0,
@@ -540,10 +540,20 @@ def ros1_to_hdmapping(
     bag_files_override: Optional[List[Path]] = None,
     start_index: int = 0,
 ) -> Dict[str, Any]:
-    """Convert ROS1 bag(s) to MandEye folder.  Returns a report dict."""
+    """Convert ROS bag(s) to MandEye folder (shared ROS1/ROS2 implementation).
+
+    Supports multi-volume sequences (via *bag_files_override*), Livox
+    ``CustomMsg`` detection (both ROS1 and ROS2), and automatic IMU unit
+    detection / conversion.  Returns a report dict.
+    """
     t0 = time.monotonic()
-    print(f"Converting ROS1 bag -> MandEye")
-    print(f"  Input:  {input_bag}")
+    mode_label = "ROS1" if is_ros1 else "ROS2"
+    mode_name = f"{mode_label.lower()}-to-hdmapping"
+    ReaderCls = Reader1 if is_ros1 else Reader2
+    deser_fn = _deserialize_ros1_safe if is_ros1 else deserialize_cdr
+
+    print(f"Converting {mode_label} bag -> MandEye")
+    print(f"  Input:  {input_path}")
     print(f"  Output: {output_dir}")
     print(f"  PC topic:  {pc_topic}")
     print(f"  IMU topic: {imu_topic}")
@@ -553,15 +563,17 @@ def ros1_to_hdmapping(
 
     os.makedirs(output_dir, exist_ok=True)
 
+    # Resolve bag file list
     if bag_files_override is not None:
         bag_files = bag_files_override
-    else:
-        bag_files = []
-        p = Path(input_bag)
+    elif is_ros1:
+        p = Path(input_path)
         if p.suffix == ".bag":
             bag_files = [p]
         else:
             bag_files = sorted(p.glob("*.bag"))
+    else:
+        bag_files = [Path(input_path)]
 
     buffer_pc: List[PointXYZIT] = []
     buffer_imu: List[str] = []
@@ -572,83 +584,89 @@ def ros1_to_hdmapping(
     total_pts = 0
     total_imu = 0
     warnings: List[str] = []
+    acc_factor = 1.0
+    gyro_factor = 1.0
+    units_detected = False
+    frame_rate_detected = False
 
     for bag_path in bag_files:
         print(f"  Processing bag: {bag_path.name}")
 
-        # Detect lidar message type
-        is_custom_msg = False
-        with Reader1(bag_path) as reader:
+        # --- Detect message types ---
+        has_custom_msg = False
+        with ReaderCls(bag_path) as reader:
             print("  Topics in bag:")
             for c in reader.connections:
-                print(f"    {c.topic}  [{c.msgtype}]  ({c.msgcount} msgs)")
+                cnt = getattr(c, "msgcount", None)
+                cnt_str = f"({cnt} msgs)" if cnt is not None else ""
+                print(f"    {c.topic}  [{c.msgtype}]  {cnt_str}")
                 if c.topic == pc_topic and "CustomMsg" in c.msgtype:
-                    is_custom_msg = True
+                    has_custom_msg = True
 
-        # IMU unit detection / resolution
-        if acc_unit and gyro_unit:
-            # Units provided (from audit JSON or CLI) — skip sampling
-            _au, acc_s2mps2 = _guess_acc_unit_by_name(acc_unit)
-            _gu, gyro_s2radps = _guess_gyro_unit_by_name(gyro_unit)
-            acc_factor, gyro_factor = _compute_imu_factors(
-                _au, acc_s2mps2, _gu, gyro_s2radps,
-            )
-            print(f"  IMU units (from audit/CLI):")
-            print(f"    Accel:  {acc_unit}  (x{acc_factor:.6f} -> g)")
-            print(f"    Gyro:   {gyro_unit}  (x{gyro_factor:.6f} -> deg/s)")
-        else:
-            # Auto-detect by sampling first ~500 IMU messages
-            acc_mags: List[float] = []
-            gyro_mags: List[float] = []
-            with Reader1(bag_path) as reader:
-              try:
-                for conn, timestamp, rawdata in reader.messages():
-                    if conn.topic == imu_topic and "Imu" in conn.msgtype:
-                        msg = _deserialize_ros1_safe(rawdata, conn.msgtype)
-                        ax = msg.linear_acceleration.x
-                        ay = msg.linear_acceleration.y
-                        az = msg.linear_acceleration.z
-                        acc_mags.append(math.sqrt(ax*ax + ay*ay + az*az))
-                        gx = msg.angular_velocity.x
-                        gy = msg.angular_velocity.y
-                        gz = msg.angular_velocity.z
-                        gyro_mags.append(math.sqrt(gx*gx + gy*gy + gz*gz))
-                        if len(acc_mags) >= 500:
-                            break
-              except (Reader1Error, Exception):
-                pass
+        # --- IMU unit detection (once, from the first bag) ---
+        if not units_detected:
+            if acc_unit and gyro_unit:
+                _au, acc_s2mps2 = _guess_acc_unit_by_name(acc_unit)
+                _gu, gyro_s2radps = _guess_gyro_unit_by_name(gyro_unit)
+                acc_factor, gyro_factor = _compute_imu_factors(
+                    _au, acc_s2mps2, _gu, gyro_s2radps,
+                )
+                print(f"  IMU units (from audit/CLI):")
+                print(f"    Accel:  {acc_unit}  (x{acc_factor:.6f} -> g)")
+                print(f"    Gyro:   {gyro_unit}  (x{gyro_factor:.6f} -> deg/s)")
+            else:
+                acc_mags: List[float] = []
+                gyro_mags: List[float] = []
+                with ReaderCls(bag_path) as reader:
+                  try:
+                    for conn, timestamp, rawdata in reader.messages():
+                        if conn.topic == imu_topic and "Imu" in conn.msgtype:
+                            msg = deser_fn(rawdata, conn.msgtype)
+                            ax = msg.linear_acceleration.x
+                            ay = msg.linear_acceleration.y
+                            az = msg.linear_acceleration.z
+                            acc_mags.append(math.sqrt(ax*ax + ay*ay + az*az))
+                            gx = msg.angular_velocity.x
+                            gy = msg.angular_velocity.y
+                            gz = msg.angular_velocity.z
+                            gyro_mags.append(math.sqrt(gx*gx + gy*gy + gz*gz))
+                            if len(acc_mags) >= 500:
+                                break
+                  except Exception:
+                    pass
 
-            acc_unit, acc_s2mps2 = _guess_acc_unit(np.array(acc_mags))
-            gyro_unit, gyro_s2radps = _guess_gyro_unit(np.array(gyro_mags))
-            acc_factor, gyro_factor = _compute_imu_factors(
-                acc_unit, acc_s2mps2, gyro_unit, gyro_s2radps,
-            )
-            print(f"  IMU units detected (auto):")
-            print(f"    Accel:  {acc_unit}  (x{acc_factor:.6f} -> g)")
-            print(f"    Gyro:   {gyro_unit}  (x{gyro_factor:.6f} -> deg/s)")
+                acc_unit, acc_s2mps2 = _guess_acc_unit(np.array(acc_mags))
+                gyro_unit, gyro_s2radps = _guess_gyro_unit(np.array(gyro_mags))
+                acc_factor, gyro_factor = _compute_imu_factors(
+                    acc_unit, acc_s2mps2, gyro_unit, gyro_s2radps,
+                )
+                print(f"  IMU units detected (auto):")
+                print(f"    Accel:  {acc_unit}  (x{acc_factor:.6f} -> g)")
+                print(f"    Gyro:   {gyro_unit}  (x{gyro_factor:.6f} -> deg/s)")
+            units_detected = True
 
-        # Pass 1: estimate frame rate if needed
-        if emulate_point_ts:
+        # --- Frame rate estimation (once, if --emulate_point_ts) ---
+        if emulate_point_ts and not frame_rate_detected:
             print("  Emulating point timestamps, collecting framerate...")
-            header_diffs = []
+            header_diffs: List[float] = []
             last_header_ts = 0.0
-            start_ts = 0.0
-            with Reader1(bag_path) as reader:
+            fr_start_ts = 0.0
+            with ReaderCls(bag_path) as reader:
               try:
                 for conn, timestamp, rawdata in reader.messages():
                     if conn.topic == pc_topic:
-                        msg = _deserialize_ros1_safe(rawdata, conn.msgtype)
+                        msg = deser_fn(rawdata, conn.msgtype)
                         ts = rostime_to_sec(msg.header.stamp)
                         if last_header_ts != 0.0:
-                            if start_ts == 0.0:
-                                start_ts = last_header_ts
+                            if fr_start_ts == 0.0:
+                                fr_start_ts = last_header_ts
                             diff = ts - last_header_ts
                             if diff > 0:
                                 header_diffs.append(diff)
-                            if ts - start_ts > 20.0:
+                            if ts - fr_start_ts > 20.0:
                                 break
                         last_header_ts = ts
-              except (Reader1Error, Exception) as exc:
+              except Exception as exc:
                 print(f"  WARNING: Bag read error (truncated/corrupt?): {exc}",
                       file=sys.stderr)
                 print("           Continuing with data read so far ...",
@@ -657,15 +675,16 @@ def ros1_to_hdmapping(
             if header_diffs:
                 lidar_frame_rate = sum(header_diffs) / len(header_diffs)
                 print(f"  Estimated frame rate: {lidar_frame_rate:.6f}s")
+            frame_rate_detected = True
 
-        # Pass 2: extract data
-        with Reader1(bag_path) as reader:
+        # --- Main data extraction pass ---
+        with ReaderCls(bag_path) as reader:
           try:
             for conn, timestamp, rawdata in reader.messages():
                 msg_time_sec = timestamp / 1e9
 
                 if conn.topic == imu_topic and "Imu" in conn.msgtype:
-                    msg = _deserialize_ros1_safe(rawdata, conn.msgtype)
+                    msg = deser_fn(rawdata, conn.msgtype)
                     ts_ns = rostime_to_nsec(msg.header.stamp)
                     d = csv_delim
                     gx = msg.angular_velocity.x * gyro_factor
@@ -686,29 +705,35 @@ def ros1_to_hdmapping(
                         last_save_ts = last_imu_ts
 
                 if conn.topic == pc_topic and last_imu_ts > 0:
-                    msg = _deserialize_ros1_safe(rawdata, conn.msgtype)
+                    msg = deser_fn(rawdata, conn.msgtype)
                     ts = rostime_to_sec(msg.header.stamp)
                     if abs(ts - last_imu_ts) < 0.05 * chunk_len:
-                        if is_custom_msg:
+                        if has_custom_msg:
                             pts = parse_custom_msg(msg)
                         else:
-                            pts = parse_pointcloud2(msg, emulate_point_ts, lidar_frame_rate)
+                            pts = parse_pointcloud2(
+                                msg, emulate_point_ts, lidar_frame_rate,
+                            )
                         buffer_pc.extend(pts)
                     else:
                         warnings.append(
-                            f"Skipped PC at {ts:.3f}s (IMU drift: {abs(ts - last_imu_ts):.3f}s)")
-                        print(f"  Skipping pointcloud at {ts:.3f}s (IMU drift: {abs(ts - last_imu_ts):.3f}s)")
+                            f"Skipped PC at {ts:.3f}s "
+                            f"(IMU drift: {abs(ts - last_imu_ts):.3f}s)")
+                        print(
+                            f"  Skipping pointcloud at {ts:.3f}s "
+                            f"(IMU drift: {abs(ts - last_imu_ts):.3f}s)")
 
                 if msg_time_sec - last_save_ts > chunk_len and last_save_ts > 0:
                     _save_chunk(output_dir, count, buffer_pc, buffer_imu,
-                                csv_delim=csv_delim, imu_id=imu_id, serial=serial)
+                                csv_delim=csv_delim, imu_id=imu_id,
+                                serial=serial)
                     total_pts += len(buffer_pc)
                     buffer_pc.clear()
                     buffer_imu.clear()
                     last_save_ts = msg_time_sec
                     count += 1
 
-          except (Reader1Error, Exception) as exc:
+          except Exception as exc:
             w = f"Bag read error on {bag_path.name}: {exc}"
             warnings.append(w)
             print(f"  WARNING: Bag read error (truncated/corrupt?): {exc}",
@@ -723,9 +748,9 @@ def ros1_to_hdmapping(
     elapsed = time.monotonic() - t0
     n_chunks = count - start_index + (1 if buffer_pc or buffer_imu else 0)
     report: Dict[str, Any] = {
-        "mode": "ros1-to-hdmapping",
+        "mode": mode_name,
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "input": input_bag,
+        "input": input_path,
         "output": output_dir,
         "bags_processed": [str(b) for b in bag_files],
         "pc_topic": pc_topic,
@@ -748,6 +773,35 @@ def ros1_to_hdmapping(
 
 
 # ---------------------------------------------------------------------------
+# Mode: ROS1 bag -> hdmapping
+# ---------------------------------------------------------------------------
+def ros1_to_hdmapping(
+    input_bag: str,
+    output_dir: str,
+    pc_topic: str = "/livox/lidar",
+    imu_topic: str = "/livox/imu",
+    chunk_len: float = 20.0,
+    emulate_point_ts: bool = False,
+    csv_delim: str = ",",
+    imu_id: int = 0,
+    serial: str = "XXXXXXXXXX",
+    acc_unit: str = "",
+    gyro_unit: str = "",
+    bag_files_override: Optional[List[Path]] = None,
+    start_index: int = 0,
+) -> Dict[str, Any]:
+    """Convert ROS1 bag(s) to MandEye folder.  Returns a report dict."""
+    return _bag_to_hdmapping(
+        input_bag, output_dir, is_ros1=True,
+        pc_topic=pc_topic, imu_topic=imu_topic,
+        chunk_len=chunk_len, emulate_point_ts=emulate_point_ts,
+        csv_delim=csv_delim, imu_id=imu_id, serial=serial,
+        acc_unit=acc_unit, gyro_unit=gyro_unit,
+        bag_files_override=bag_files_override, start_index=start_index,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Mode: ROS2 bag -> hdmapping
 # ---------------------------------------------------------------------------
 def ros2_to_hdmapping(
@@ -762,187 +816,18 @@ def ros2_to_hdmapping(
     serial: str = "XXXXXXXXXX",
     acc_unit: str = "",
     gyro_unit: str = "",
+    bag_files_override: Optional[List[Path]] = None,
     start_index: int = 0,
 ) -> Dict[str, Any]:
     """Convert ROS2 bag to MandEye folder.  Returns a report dict."""
-    t0 = time.monotonic()
-    print(f"Converting ROS2 bag -> MandEye")
-    print(f"  Input:  {input_bag}")
-    print(f"  Output: {output_dir}")
-    print(f"  PC topic:  {pc_topic}")
-    print(f"  IMU topic: {imu_topic}")
-    print(f"  Chunk len: {chunk_len}s")
-    if start_index:
-        print(f"  Start index: {start_index}")
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    buffer_pc: List[PointXYZIT] = []
-    buffer_imu: List[str] = []
-    last_save_ts = 0.0
-    count = start_index
-    last_imu_ts = -1.0
-    lidar_frame_rate = 0.0
-    total_pts = 0
-    total_imu = 0
-    warnings: List[str] = []
-
-    # IMU unit detection / resolution
-    if acc_unit and gyro_unit:
-        # Units provided (from audit JSON or CLI) — skip sampling
-        _au, acc_s2mps2 = _guess_acc_unit_by_name(acc_unit)
-        _gu, gyro_s2radps = _guess_gyro_unit_by_name(gyro_unit)
-        acc_factor, gyro_factor = _compute_imu_factors(
-            _au, acc_s2mps2, _gu, gyro_s2radps,
-        )
-        print(f"  IMU units (from audit/CLI):")
-        print(f"    Accel:  {acc_unit}  (x{acc_factor:.6f} -> g)")
-        print(f"    Gyro:   {gyro_unit}  (x{gyro_factor:.6f} -> deg/s)")
-    else:
-        # Auto-detect by sampling first ~500 IMU messages
-        acc_mags: List[float] = []
-        gyro_mags: List[float] = []
-        with Reader2(input_bag) as reader:
-          try:
-            for conn, timestamp, rawdata in reader.messages():
-                if conn.topic == imu_topic:
-                    msg = deserialize_cdr(rawdata, conn.msgtype)
-                    ax = msg.linear_acceleration.x
-                    ay = msg.linear_acceleration.y
-                    az = msg.linear_acceleration.z
-                    acc_mags.append(math.sqrt(ax*ax + ay*ay + az*az))
-                    gx = msg.angular_velocity.x
-                    gy = msg.angular_velocity.y
-                    gz = msg.angular_velocity.z
-                    gyro_mags.append(math.sqrt(gx*gx + gy*gy + gz*gz))
-                    if len(acc_mags) >= 500:
-                        break
-          except Exception:
-            pass
-
-        acc_unit, acc_s2mps2 = _guess_acc_unit(np.array(acc_mags))
-        gyro_unit, gyro_s2radps = _guess_gyro_unit(np.array(gyro_mags))
-        acc_factor, gyro_factor = _compute_imu_factors(
-            acc_unit, acc_s2mps2, gyro_unit, gyro_s2radps,
-        )
-        print(f"  IMU units detected (auto):")
-        print(f"    Accel:  {acc_unit}  (x{acc_factor:.6f} -> g)")
-        print(f"    Gyro:   {gyro_unit}  (x{gyro_factor:.6f} -> deg/s)")
-
-    # Pass 1: estimate frame rate if needed
-    if emulate_point_ts:
-        print("  Emulating point timestamps, collecting framerate...")
-        header_diffs = []
-        last_header_ts = 0.0
-        start_ts = 0.0
-        with Reader2(input_bag) as reader:
-          try:
-            for conn, timestamp, rawdata in reader.messages():
-                if conn.topic == pc_topic:
-                    msg = deserialize_cdr(rawdata, conn.msgtype)
-                    ts = rostime_to_sec(msg.header.stamp)
-                    if last_header_ts != 0.0:
-                        if start_ts == 0.0:
-                            start_ts = last_header_ts
-                        diff = ts - last_header_ts
-                        if diff > 0:
-                            header_diffs.append(diff)
-                        if ts - start_ts > 20.0:
-                            break
-                    last_header_ts = ts
-          except Exception as exc:
-            print(f"  WARNING: Bag read error (truncated/corrupt?): {exc}",
-                  file=sys.stderr)
-            print("           Continuing with data read so far ...",
-                  file=sys.stderr)
-
-        if header_diffs:
-            lidar_frame_rate = sum(header_diffs) / len(header_diffs)
-            print(f"  Estimated frame rate: {lidar_frame_rate:.6f}s")
-
-    # Pass 2: extract data
-    with Reader2(input_bag) as reader:
-      try:
-        for conn, timestamp, rawdata in reader.messages():
-            msg_time_sec = timestamp / 1e9
-
-            if conn.topic == imu_topic:
-                msg = deserialize_cdr(rawdata, conn.msgtype)
-                ts_ns = rostime_to_nsec(msg.header.stamp)
-                d = csv_delim
-                gx = msg.angular_velocity.x * gyro_factor
-                gy = msg.angular_velocity.y * gyro_factor
-                gz = msg.angular_velocity.z * gyro_factor
-                ax = msg.linear_acceleration.x * acc_factor
-                ay = msg.linear_acceleration.y * acc_factor
-                az = msg.linear_acceleration.z * acc_factor
-                line = (
-                    f"{ts_ns}{d}"
-                    f"{gx}{d}{gy}{d}{gz}{d}"
-                    f"{ax}{d}{ay}{d}{az}"
-                )
-                buffer_imu.append(line)
-                last_imu_ts = rostime_to_sec(msg.header.stamp)
-                total_imu += 1
-                if last_save_ts == 0.0:
-                    last_save_ts = last_imu_ts
-
-            if conn.topic == pc_topic and last_imu_ts > 0:
-                msg = deserialize_cdr(rawdata, conn.msgtype)
-                ts = rostime_to_sec(msg.header.stamp)
-                if abs(ts - last_imu_ts) < 0.05 * chunk_len:
-                    pts = parse_pointcloud2(msg, emulate_point_ts, lidar_frame_rate)
-                    buffer_pc.extend(pts)
-                else:
-                    warnings.append(
-                        f"Skipped PC at {ts:.3f}s (IMU drift: {abs(ts - last_imu_ts):.3f}s)")
-                    print(f"  Skipping pointcloud at {ts:.3f}s (IMU drift: {abs(ts - last_imu_ts):.3f}s)")
-
-            if msg_time_sec - last_save_ts > chunk_len and last_save_ts > 0:
-                _save_chunk(output_dir, count, buffer_pc, buffer_imu,
-                            csv_delim=csv_delim, imu_id=imu_id, serial=serial)
-                total_pts += len(buffer_pc)
-                buffer_pc.clear()
-                buffer_imu.clear()
-                last_save_ts = msg_time_sec
-                count += 1
-
-      except Exception as exc:
-        w = f"Bag read error: {exc}"
-        warnings.append(w)
-        print(f"  WARNING: Bag read error (truncated/corrupt?): {exc}",
-              file=sys.stderr)
-        print("           Saving data read so far ...", file=sys.stderr)
-
-    if buffer_pc or buffer_imu:
-        _save_chunk(output_dir, count, buffer_pc, buffer_imu,
-                    csv_delim=csv_delim, imu_id=imu_id, serial=serial)
-        total_pts += len(buffer_pc)
-
-    elapsed = time.monotonic() - t0
-    n_chunks = count - start_index + (1 if buffer_pc or buffer_imu else 0)
-    report: Dict[str, Any] = {
-        "mode": "ros2-to-hdmapping",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "input": input_bag,
-        "output": output_dir,
-        "pc_topic": pc_topic,
-        "imu_topic": imu_topic,
-        "chunk_len_s": chunk_len,
-        "start_index": start_index,
-        "chunks_written": n_chunks,
-        "chunk_range": [start_index, count],
-        "total_points": total_pts,
-        "total_imu_messages": total_imu,
-        "acc_unit": acc_unit,
-        "gyro_unit": gyro_unit,
-        "imu_id": imu_id,
-        "serial": serial,
-        "elapsed_s": round(elapsed, 2),
-        "warnings": warnings,
-    }
-    print("Done!")
-    return report
+    return _bag_to_hdmapping(
+        input_bag, output_dir, is_ros1=False,
+        pc_topic=pc_topic, imu_topic=imu_topic,
+        chunk_len=chunk_len, emulate_point_ts=emulate_point_ts,
+        csv_delim=csv_delim, imu_id=imu_id, serial=serial,
+        acc_unit=acc_unit, gyro_unit=gyro_unit,
+        bag_files_override=bag_files_override, start_index=start_index,
+    )
 
 
 # resolve_unique_output_path imported from mandeye_bag_common
@@ -1259,6 +1144,7 @@ Output report:
             serial=args.serial,
             acc_unit=args.acc_unit,
             gyro_unit=args.gyro_unit,
+            bag_files_override=bag_sequence,
             start_index=args.start_index,
         )
 
