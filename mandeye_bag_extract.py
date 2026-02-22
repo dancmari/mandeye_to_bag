@@ -42,6 +42,56 @@ Usage:
   python mandeye_bag_extract.py recording.bag -o out --topics "/livox/*" --format both
   python mandeye_bag_extract.py recording.bag -o out --topics /imu --format csv
   python mandeye_bag_extract.py ./bag_dir/ -o out --topics "*" --format bag --sequence
+
+Pointcloud extraction example:
+  $ python mandeye_bag_extract.py rec.bag -o out --topics /livox/lidar --format csv
+    LAZ: out/livox_lidar.laz  (1,234,567 points)
+    Report: out/extract_report.json
+  Result:
+    out/
+      livox_lidar.laz              # all points merged into one LAZ file
+      extract_report.json
+
+Image extraction examples:
+  # CompressedImage (JPEG from camera):
+  $ python mandeye_bag_extract.py rec.bag -o out --topics /camera/compressed --format csv
+    Images: out/camera_compressed  (847 files)
+  Result:
+    out/
+      camera_compressed/
+        1706000000_000000000.jpg
+        1706000000_100000000.jpg
+        ...
+      extract_report.json
+
+  # Raw Image (RGB from camera, requires Pillow):
+  $ python mandeye_bag_extract.py rec.bag -o out --topics /camera/image_raw --format csv
+    Images: out/camera_image_raw  (420 files)
+  Result:
+    out/
+      camera_image_raw/
+        1706000000_000000000.png    # 8-bit -> PNG
+        ...
+      extract_report.json
+
+  # 16-bit depth camera (mono16 encoding):
+  $ python mandeye_bag_extract.py rec.bag -o out --topics /depth/image --format csv
+  Result:
+    out/
+      depth_image/
+        1706000000_000000000.tif    # 16-bit -> TIFF
+        ...
+
+  # Everything at once:
+  $ python mandeye_bag_extract.py rec.bag -o out --topics "*" --format both
+  Result:
+    out/
+      rec_filtered.bag             # filtered bag with all topics
+      livox_lidar.laz              # pointcloud
+      livox_imu.csv                # IMU data
+      camera_compressed/           # JPEG images
+        ...
+      extract_report.json
 """
 
 from __future__ import annotations
@@ -768,6 +818,33 @@ Examples:
   python mandeye_bag_extract.py recording.bag -o out --topics /livox/lidar --format csv  # LAZ
   python mandeye_bag_extract.py recording.bag -o out --topics /camera/image --format csv  # images
   python mandeye_bag_extract.py ./bag_dir/ -o out --topics "*" --format bag --sequence
+
+Pointcloud output (--format csv / both):
+  All points from selected pointcloud topics are merged into a single LAZ
+  file per topic (compressed LAS, point_format=1).  Fields: x, y, z,
+  intensity (uint16), gps_time (seconds from nanosecond timestamp).
+  Example:
+    out/
+      livox_lidar.laz              # e.g. 1,234,567 points
+
+Image output (--format csv / both):
+  Each image message is saved as a separate file in a subfolder named
+  after the topic.  Filename = nanosecond timestamp (sec_nsec.ext).
+
+  CompressedImage ->  saved as-is (jpg/png/tif/bmp/webp)
+  Image (8-bit)   ->  PNG  (rgb8, bgr8, mono8, rgba8, bgra8)
+  Image (16-bit)  ->  TIFF (mono16, 16UC1)
+  Image (unknown) ->  .raw (raw bytes)
+
+  Example:
+    out/
+      camera_compressed/           # CompressedImage topic
+        1706000000_000000000.jpg
+        1706000000_100000000.jpg
+      camera_image_raw/            # Image topic
+        1706000000_000000000.png
+      depth_image/                 # 16-bit Image topic
+        1706000000_000000000.tif
 """,
     )
     p.add_argument("bag", help="Path to ROS1 .bag file, ROS2 bag folder, "
