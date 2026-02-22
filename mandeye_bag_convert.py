@@ -57,9 +57,13 @@ Output (bag → MandEye modes):
   convert_report.json with conversion metadata, chunk counts,
   point/IMU totals, timing, and any warnings.
 
-Pipeline (audit → convert):
+Pipeline (audit → convert, bag → MandEye):
   python mandeye_bag_audit.py  recording.bag --json audit.json
   python mandeye_bag_convert.py recording.bag output ros1-to-hdmapping --audit-json audit.json
+
+Pipeline (MandEye → bag):
+  python mandeye_bag_convert.py ./my_dataset ./output.bag hdmapping-to-ros1
+  python mandeye_bag_convert.py ./my_dataset ./output_ros2 hdmapping-to-ros2
 """
 
 from __future__ import annotations
@@ -1045,9 +1049,18 @@ IMU unit conversion (bag -> MandEye):
     3. Auto-detection             (samples first 500 IMU messages)
 
 Examples:
+  # MandEye → ROS1 bag:
   python mandeye_bag_convert.py ./my_dataset ./output.bag hdmapping-to-ros1
-  python mandeye_bag_convert.py ./output.bag ./extracted   ros1-to-hdmapping
+  python mandeye_bag_convert.py ./my_dataset ./output.bag hdmapping-to-ros1 --imu_topic /imu --pointcloud_topic /points
+
+  # MandEye → ROS2 bag:
   python mandeye_bag_convert.py ./my_dataset ./output_ros2 hdmapping-to-ros2
+  python mandeye_bag_convert.py ./my_dataset ./output_ros2 hdmapping-to-ros2 --imu_topic /imu --pointcloud_topic /points
+
+  # ROS1 bag → MandEye:
+  python mandeye_bag_convert.py ./output.bag ./extracted   ros1-to-hdmapping
+
+  # ROS2 bag → MandEye:
   python mandeye_bag_convert.py ./output_ros2 ./extracted  ros2-to-hdmapping
 
   # With audit JSON (auto topics + units):
@@ -1065,6 +1078,14 @@ Examples:
 
   # Start chunk index at 5 (appending to existing dataset):
   python mandeye_bag_convert.py next.bag out ros1-to-hdmapping --start_index 5
+
+  # Round-trip: MandEye → ROS1 → MandEye:
+  python mandeye_bag_convert.py ./dataset ./recording.bag hdmapping-to-ros1
+  python mandeye_bag_convert.py ./recording.bag ./extracted ros1-to-hdmapping
+
+  # Round-trip: MandEye → ROS2 → MandEye:
+  python mandeye_bag_convert.py ./dataset ./recording_ros2 hdmapping-to-ros2
+  python mandeye_bag_convert.py ./recording_ros2 ./extracted ros2-to-hdmapping
 
 Output report:
   For bag-to-MandEye modes, a convert_report.json is written to the
