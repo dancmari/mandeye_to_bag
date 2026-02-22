@@ -59,7 +59,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from mandeye_common import (
+from mandeye_bag_common import (
     Reader1, Reader1Error, Reader2,
     deserialize_cdr, deserialize_ros1, ros1_to_cdr,
     deserialize_ros1_tracked,
@@ -85,7 +85,7 @@ _DS_OK = "ok"
 _DS_FALLBACK = "fallback"
 _DS_FAIL = "fail"
 
-# Aliases — the tracked variant from mandeye_common returns (msg|None, status)
+# Aliases — the tracked variant from mandeye_bag_common returns (msg|None, status)
 _audit_deserialize_ros1 = deserialize_ros1_tracked
 
 
@@ -162,7 +162,7 @@ def _pc2_read_time_field(msg, max_points: int = 64) -> Optional[List[float]]:
     return values if values else None
 
 
-# _guess_acc_unit, _guess_gyro_unit imported from mandeye_common
+# _guess_acc_unit, _guess_gyro_unit imported from mandeye_bag_common
 
 # ---------------------------------------------------------------------------
 # Data collected per topic
@@ -1298,7 +1298,7 @@ def print_report(
     print()
 
 
-# Sequence detection imported from mandeye_common:
+# Sequence detection imported from mandeye_bag_common:
 #   _extract_seq_prefix, detect_bag_sequence, SequenceInfo,
 #   validate_bag_sequence, _print_sequence_summary
 

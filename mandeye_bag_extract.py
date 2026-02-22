@@ -55,7 +55,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from mandeye_common import (
+from mandeye_bag_common import (
     Reader1, Reader1Error, Reader2,
     Writer1,
     typestore,

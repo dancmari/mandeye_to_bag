@@ -1,5 +1,5 @@
 """
-mandeye_common.py — Shared utilities for MandEye bag tools.
+mandeye_bag_common.py — Shared utilities for MandEye bag tools.
 
 Provides ROS type-system setup (including Livox custom types), safe
 deserialization helpers, IMU unit detection / conversion, bag-sequence

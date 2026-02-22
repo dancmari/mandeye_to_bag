@@ -84,7 +84,7 @@ try:
 except ImportError:
     sys.exit("ERROR: 'laspy' is required.  Install with:  pip install laspy[lazrs]")
 
-from mandeye_common import (
+from mandeye_bag_common import (
     Reader1, Reader1Error, Reader2,
     Writer1, Writer2,
     typestore,
@@ -134,7 +134,7 @@ class ImuSample(NamedTuple):
 
 
 # IMU unit functions, sequence detection, resolve_unique_output_path,
-# add_sequence_args, detect_dir_bags  — all imported from mandeye_common
+# add_sequence_args, detect_dir_bags  — all imported from mandeye_bag_common
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +258,7 @@ def save_imu_csv(path: str, samples: List[str], delim: str = ",", imu_id: int = 
     print(f"  Saved {len(samples)} IMU samples -> {path}")
 
 
-# ROS time utilities imported from mandeye_common:
+# ROS time utilities imported from mandeye_bag_common:
 #   sec_to_rostime, rostime_to_sec, rostime_to_nsec, sec_to_nsec
 
 
@@ -944,7 +944,7 @@ def ros2_to_hdmapping(
     return report
 
 
-# resolve_unique_output_path imported from mandeye_common
+# resolve_unique_output_path imported from mandeye_bag_common
 
 
 # ---------------------------------------------------------------------------
