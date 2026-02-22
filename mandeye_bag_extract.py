@@ -7,9 +7,10 @@ file and/or CSV files, with automatic topic-type identification.
 
 Supported output formats (--format):
   bag   — write a new ROS1 bag containing only the selected topics
-  csv   — write per-topic CSV files (where applicable: IMU, NavSatFix, NMEA,
-           Odometry, TF)
-  both  — produce both a filtered bag AND CSV files
+  csv   — write per-topic data files:
+           • IMU, NavSatFix, NMEA, Odometry, TF → CSV
+           • PointCloud2, Livox CustomMsg → LAZ (compressed point cloud)
+  both  — produce both a filtered bag AND data files (CSV + LAZ)
 
 Topic selection (--topics):
   Specify one or more topic names or glob patterns.
@@ -31,7 +32,7 @@ Multi-volume / split bag sequences:
 Listing mode:
   --list        show all topics with type classification and exit
 
-Dependencies:  pip install rosbags numpy
+Dependencies:  pip install rosbags numpy laspy[lazrs]
 
 Usage:
   python mandeye_bag_extract.py recording.bag --list
@@ -48,12 +49,18 @@ import csv as csv_mod
 import fnmatch
 import json
 import os
+import struct
 import sys
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+
+try:
+    import laspy
+except ImportError:
+    laspy = None  # LAZ export unavailable
 
 from mandeye_bag_common import (
     Reader1, Reader1Error, Reader2,
@@ -63,8 +70,9 @@ from mandeye_bag_common import (
     deserialize_cdr,
     rostime_to_sec, rostime_to_nsec,
     classify_topic,
-    is_imu_type, is_pc_type, is_navsatfix_type, is_nmea_type,
+    is_imu_type, is_pc_type, is_custom_msg, is_navsatfix_type, is_nmea_type,
     is_odometry_type, is_tf_type,
+    rostime_to_nsec as _rostime_to_nsec,
     detect_bag_sequence,
     validate_bag_sequence,
     print_sequence_summary,
@@ -199,6 +207,85 @@ def _write_tf_csv(path: str, rows: List[List[Any]]) -> int:
 
 
 # ============================================================================
+# Pointcloud → LAZ export
+# ============================================================================
+
+def _parse_pointcloud2_points(
+    msg, is_ros1: bool,
+) -> List[Tuple[float, float, float, float, float]]:
+    """Parse a PointCloud2 message into (x, y, z, intensity, timestamp_ns) tuples."""
+    field_map = {f.name: f for f in msg.fields}
+    x_off = field_map["x"].offset
+    y_off = field_map["y"].offset
+    z_off = field_map["z"].offset
+    i_field = field_map.get("intensity", field_map.get("i", None))
+    i_off = i_field.offset if i_field else -1
+
+    data = bytes(msg.data)
+    ps = msg.point_step
+    n = msg.width * msg.height
+    header_ts_ns = _rostime_to_nsec(msg.header.stamp)
+
+    points: List[Tuple[float, float, float, float, float]] = []
+    for idx in range(n):
+        base = idx * ps
+        x = struct.unpack_from("<f", data, base + x_off)[0]
+        y = struct.unpack_from("<f", data, base + y_off)[0]
+        z = struct.unpack_from("<f", data, base + z_off)[0]
+        intensity = (
+            struct.unpack_from("<f", data, base + i_off)[0]
+            if i_off >= 0 else 0.0
+        )
+        points.append((x, y, z, intensity, float(header_ts_ns)))
+    return points
+
+
+def _parse_custom_msg_points(
+    msg,
+) -> List[Tuple[float, float, float, float, float]]:
+    """Parse a Livox CustomMsg into (x, y, z, intensity, timestamp_ns) tuples."""
+    points: List[Tuple[float, float, float, float, float]] = []
+    timebase = msg.timebase  # nanoseconds
+    for p in msg.points:
+        ts_ns = timebase + p.offset_time
+        points.append((p.x, p.y, p.z, float(p.reflectivity), float(ts_ns)))
+    return points
+
+
+def _write_pointcloud_laz(
+    path: str,
+    points: List[Tuple[float, float, float, float, float]],
+) -> int:
+    """Write pointcloud data to a LAZ file.  Returns point count."""
+    if laspy is None:
+        print("  WARNING: laspy not installed, skipping LAZ export. "
+              "Install with: pip install laspy[lazrs]")
+        return 0
+    if not points:
+        return 0
+
+    xs = np.array([p[0] for p in points], dtype=np.float64)
+    ys = np.array([p[1] for p in points], dtype=np.float64)
+    zs = np.array([p[2] for p in points], dtype=np.float64)
+    intensities = np.array([p[3] for p in points], dtype=np.uint16)
+    timestamps = np.array([p[4] for p in points], dtype=np.float64)
+
+    header = laspy.LasHeader(point_format=1, version="1.2")
+    header.offsets = [float(np.min(xs)), float(np.min(ys)), float(np.min(zs))]
+    header.scales = [0.0001, 0.0001, 0.0001]
+
+    las = laspy.LasData(header)
+    las.x = xs
+    las.y = ys
+    las.z = zs
+    las.intensity = intensities
+    las.gps_time = timestamps * 1e-9  # nanoseconds → seconds
+
+    las.write(path)
+    return len(points)
+
+
+# ============================================================================
 # Extraction core
 # ============================================================================
 
@@ -250,8 +337,12 @@ def extract_from_bag(
     files_to_process = bag_files if bag_files else [bag_path]
     is_ros1 = bag_path.suffix == ".bag"
 
-    # accumulators for CSV
+    # accumulators for CSV / LAZ
     csv_data: Dict[str, List[List[Any]]] = {t: [] for t in topic_names}
+    pc_points: Dict[str, List[Tuple[float, float, float, float, float]]] = {
+        t: [] for t in topic_names
+        if topic_meta[t]["category"] == "pointcloud"
+    }
     msg_counts: Dict[str, int] = {t: 0 for t in topic_names}
     warnings: List[str] = []
 
@@ -293,19 +384,31 @@ def extract_from_bag(
                         if writer is not None and topic in writer_conns:
                             writer.write(writer_conns[topic], timestamp, rawdata)
 
-                        # Collect CSV data
+                        # Collect CSV / LAZ data
                         if write_csv:
                             cat = topic_meta[topic]["category"]
-                            msg = None
-                            if cat in ("imu", "navsatfix", "nmea",
-                                       "odometry", "tf"):
+                            if cat == "pointcloud" and topic in pc_points:
                                 msg = _deserialize_msg(
                                     rawdata, conn.msgtype, cur_is_ros1,
                                 )
-                            if msg is None:
-                                continue
-                            ts = timestamp / 1e9
-                            _collect_csv_row(csv_data, topic, cat, msg, ts)
+                                if msg is not None:
+                                    if is_custom_msg(conn.msgtype):
+                                        pts = _parse_custom_msg_points(msg)
+                                    else:
+                                        pts = _parse_pointcloud2_points(
+                                            msg, cur_is_ros1,
+                                        )
+                                    pc_points[topic].extend(pts)
+                            elif cat in ("imu", "navsatfix", "nmea",
+                                         "odometry", "tf"):
+                                msg = _deserialize_msg(
+                                    rawdata, conn.msgtype, cur_is_ros1,
+                                )
+                                if msg is not None:
+                                    ts = timestamp / 1e9
+                                    _collect_csv_row(
+                                        csv_data, topic, cat, msg, ts,
+                                    )
 
                 except (Reader1Error, Exception) as exc:
                     w = (f"WARNING: {bag_file.name} read error "
@@ -323,11 +426,26 @@ def extract_from_bag(
         total_msgs = sum(msg_counts.values())
         print(f"  Filtered bag: {bag_out_path}  ({total_msgs} messages)")
 
+    # --- Write LAZ files for pointcloud topics ---
+    laz_files: Dict[str, str] = {}
+    if write_csv:
+        for topic in sorted(pc_points):
+            pts = pc_points[topic]
+            if not pts:
+                continue
+            path = _csv_path(output_dir, topic, suffix=".laz")
+            n = _write_pointcloud_laz(path, pts)
+            if n > 0:
+                laz_files[topic] = path
+                print(f"  LAZ: {path}  ({n:,} points)")
+
     # --- Write CSV files ---
     csv_files: Dict[str, str] = {}
     if write_csv:
         for topic in sorted(topic_names):
             cat = topic_meta[topic]["category"]
+            if cat == "pointcloud":
+                continue  # already exported as LAZ above
             rows = csv_data.get(topic, [])
             if not rows:
                 continue
@@ -353,6 +471,7 @@ def extract_from_bag(
                 "category": t["category"],
                 "messages": msg_counts.get(t["topic"], 0),
                 "csv_file": csv_files.get(t["topic"]),
+                "laz_file": laz_files.get(t["topic"]),
             }
             for t in selected_topics
         ],
@@ -460,11 +579,16 @@ Topic type categories (auto-detected):
   tf               tf2_msgs/TFMessage
   other            everything else
 
+Data export (--format csv / both):
+  imu, navsatfix, nmea, odometry, tf  ->  CSV files
+  pointcloud (PointCloud2, CustomMsg)  ->  LAZ (compressed point cloud)
+
 Examples:
   python mandeye_bag_extract.py recording.bag --list
   python mandeye_bag_extract.py recording.bag -o out --topics /livox/imu
   python mandeye_bag_extract.py recording.bag -o out --topics "/livox/*" --format both
   python mandeye_bag_extract.py recording.bag -o out --topics /imu --format csv
+  python mandeye_bag_extract.py recording.bag -o out --topics /livox/lidar --format csv  # LAZ
   python mandeye_bag_extract.py ./bag_dir/ -o out --topics "*" --format bag --sequence
 """,
     )
