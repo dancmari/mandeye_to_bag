@@ -380,12 +380,9 @@ def hdmapping_to_ros1(
 
     print(f"  Found {len(files_imu)} IMU files, {len(files_laz)} LAZ files")
 
-    # We need ROS1 typestore for serialization
-    typestore_ros1 = get_typestore(Stores.ROS2_HUMBLE)
-
     with Writer1(output_bag) as writer:
-        imu_conn = writer.add_connection(imu_topic, typestore_ros1.types["sensor_msgs/msg/Imu"].__msgtype__)
-        pc_conn = writer.add_connection(pc_topic, typestore_ros1.types["sensor_msgs/msg/PointCloud2"].__msgtype__)
+        imu_conn = writer.add_connection(imu_topic, Imu.__msgtype__)
+        pc_conn = writer.add_connection(pc_topic, PointCloud2.__msgtype__)
 
         # Write IMU data
         total_imu = 0
