@@ -49,7 +49,6 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import re
 import struct
 import sys
 import textwrap
@@ -60,71 +59,40 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-try:
-    from rosbags.rosbag1 import Reader as Reader1
-    from rosbags.rosbag1.reader import ReaderError as Reader1Error
-    from rosbags.rosbag2 import Reader as Reader2
-    from rosbags.typesys import Stores, get_typestore
-except ImportError:
-    sys.exit("ERROR: 'rosbags' is required.  Install with:  pip install rosbags")
-
-# ---------------------------------------------------------------------------
-# Type-system setup
-# ---------------------------------------------------------------------------
-typestore = get_typestore(Stores.ROS2_HUMBLE)
-_deserialize_cdr = typestore.deserialize_cdr
-_deserialize_ros1 = typestore.deserialize_ros1
-_ros1_to_cdr = typestore.ros1_to_cdr
-
-# Register Livox custom types
-try:
-    from rosbags.typesys.msg import get_types_from_msg
-
-    _CP_DEF = (
-        "uint32 offset_time\nfloat32 x\nfloat32 y\nfloat32 z\n"
-        "uint8 reflectivity\nuint8 tag\nuint8 line"
-    )
-    _CM_DEF = (
-        "std_msgs/Header header\nuint64 timebase\nuint32 point_num\n"
-        "uint8 lidar_id\nuint8[3] rsvd\n{pkg}/CustomPoint[] points"
-    )
-    for _pkg in ("livox_ros_driver", "livox_ros_driver2"):
-        typestore.register(get_types_from_msg(_CP_DEF, f"{_pkg}/msg/CustomPoint"))
-        typestore.register(
-            get_types_from_msg(_CM_DEF.format(pkg=_pkg), f"{_pkg}/msg/CustomMsg")
-        )
-except Exception:
-    pass
+from mandeye_common import (
+    Reader1, Reader1Error, Reader2,
+    deserialize_cdr, deserialize_ros1, ros1_to_cdr,
+    deserialize_ros1_tracked,
+    rostime_to_sec as _rostime_sec,
+    is_imu_type as _is_imu_type,
+    is_pc_type as _is_pc_type,
+    is_custom_msg as _is_custom_msg,
+    guess_acc_unit as _guess_acc_unit,
+    guess_gyro_unit as _guess_gyro_unit,
+    extract_seq_prefix as _extract_seq_prefix,
+    detect_bag_sequence,
+    SequenceInfo,
+    validate_bag_sequence,
+    print_sequence_summary as _print_sequence_summary,
+    add_sequence_args,
+    detect_dir_bags,
+)
 
 # ---------------------------------------------------------------------------
 # Deserialization with explicit error tracking
 # ---------------------------------------------------------------------------
-# Status constants
 _DS_OK = "ok"
 _DS_FALLBACK = "fallback"
 _DS_FAIL = "fail"
 
-
-def _audit_deserialize_ros1(raw: bytes, msgtype: str):
-    """Try ROS1 native first; on failure try ros1→cdr fallback.
-    Returns (msg | None, status).
-    """
-    try:
-        msg = _deserialize_ros1(raw, msgtype)
-        return msg, _DS_OK
-    except Exception:
-        pass
-    try:
-        msg = _deserialize_cdr(_ros1_to_cdr(raw, msgtype), msgtype)
-        return msg, _DS_FALLBACK
-    except Exception:
-        return None, _DS_FAIL
+# Aliases — the tracked variant from mandeye_common returns (msg|None, status)
+_audit_deserialize_ros1 = deserialize_ros1_tracked
 
 
 def _audit_deserialize_cdr(raw: bytes, msgtype: str):
     """CDR deserializer with fail tracking."""
     try:
-        msg = _deserialize_cdr(raw, msgtype)
+        msg = deserialize_cdr(raw, msgtype)
         return msg, _DS_OK
     except Exception:
         return None, _DS_FAIL
@@ -133,27 +101,11 @@ def _audit_deserialize_cdr(raw: bytes, msgtype: str):
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def _rostime_sec(stamp) -> float:
-    return float(stamp.sec) + float(stamp.nanosec) / 1e9
-
-
 def _header_ts(msg) -> Optional[float]:
     try:
         return _rostime_sec(msg.header.stamp)
     except Exception:
         return None
-
-
-def _is_imu_type(msgtype: str) -> bool:
-    return "Imu" in msgtype
-
-
-def _is_pc_type(msgtype: str) -> bool:
-    return "PointCloud2" in msgtype or "CustomMsg" in msgtype
-
-
-def _is_custom_msg(msgtype: str) -> bool:
-    return "CustomMsg" in msgtype
 
 
 # PointCloud2 field-type sizes (ROS datatype enum → (struct_char, byte_size))
@@ -210,52 +162,7 @@ def _pc2_read_time_field(msg, max_points: int = 64) -> Optional[List[float]]:
     return values if values else None
 
 
-# ---------------------------------------------------------------------------
-# IMU unit auto-detection
-# ---------------------------------------------------------------------------
-def _guess_acc_unit(magnitudes: np.ndarray) -> Tuple[str, float]:
-    """Guess accelerometer unit from |acc| distribution.
-    Returns (unit_label, scale_to_mps2).
-    """
-    if len(magnitudes) == 0:
-        return "?", 1.0
-    med = float(np.median(magnitudes))
-    # m/s² → gravity ≈ 9.81
-    if 7.0 <= med <= 12.5:
-        return "m/s²", 1.0
-    # g → gravity ≈ 1.0
-    if 0.7 <= med <= 1.4:
-        return "g", 9.80665
-    # milli-g → gravity ≈ 1000
-    if 800 <= med <= 1300:
-        return "mg", 9.80665 / 1000.0
-    # mm/s² → gravity ≈ 9810
-    if 7000 <= med <= 12500:
-        return "mm/s²", 0.001
-    return "?", 1.0
-
-
-def _guess_gyro_unit(magnitudes: np.ndarray) -> Tuple[str, float]:
-    """Guess gyroscope unit from |gyro| distribution.
-    Returns (unit_label, scale_to_radps).
-
-    Heuristic: if the 99th percentile > 25 while median < 15, the values are
-    almost certainly in deg/s (25 rad/s ≈ 1432 deg/s is extreme for most
-    terrestrial applications).
-    """
-    if len(magnitudes) == 0:
-        return "?", 1.0
-    p99 = float(np.percentile(magnitudes, 99))
-    med = float(np.median(magnitudes))
-    # Default assumption for ROS: rad/s
-    if p99 < 20:
-        return "rad/s", 1.0
-    # If p99 in 20..700 range → probably deg/s  (20 deg/s is gentle, 700 is fast spin)
-    if 20 <= p99 <= 2000:
-        return "deg/s", math.pi / 180.0
-    # Large values might be mdeg/s or raw ADC counts
-    return "?", 1.0
-
+# _guess_acc_unit, _guess_gyro_unit imported from mandeye_common
 
 # ---------------------------------------------------------------------------
 # Data collected per topic
@@ -1391,125 +1298,9 @@ def print_report(
     print()
 
 
-# ============================================================================
-# BAG SEQUENCE DETECTION (multi-volume / split recordings)
-# ============================================================================
-
-def _extract_seq_prefix(stem: str) -> Tuple[str, Optional[int]]:
-    """Extract ``(prefix, index)`` from a bag filename stem.
-
-    Handles common rosbag-split naming conventions::
-
-        recording           -> ("recording", None)
-        recording_0         -> ("recording", 0)
-        recording_003       -> ("recording", 3)
-        rec_2022-01-01-12-00-00_0  -> ("rec", 0)
-    """
-    # prefix_DATETIME_INDEX
-    m = re.match(
-        r'^(.+?)_\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}_(\d+)$', stem,
-    )
-    if m:
-        return m.group(1), int(m.group(2))
-    # prefix_INDEX
-    m = re.match(r'^(.+?)_(\d+)$', stem)
-    if m:
-        return m.group(1), int(m.group(2))
-    # no index
-    return stem, None
-
-
-def detect_bag_sequence(bag_path: Path) -> List[Path]:
-    """Find all ``.bag`` siblings that share the same recording prefix.
-
-    Returns a list sorted by sequence index.  Always contains at least
-    ``bag_path`` itself.  For non-``.bag`` inputs (e.g. ROS2 folders)
-    returns ``[bag_path]`` unchanged.
-    """
-    if bag_path.suffix != ".bag":
-        return [bag_path]
-
-    prefix, _ = _extract_seq_prefix(bag_path.stem)
-    parent = bag_path.parent
-
-    candidates: List[Tuple[int, Path]] = []
-    for f in sorted(parent.glob("*.bag")):
-        p, idx = _extract_seq_prefix(f.stem)
-        if p == prefix:
-            candidates.append((idx if idx is not None else -1, f))
-
-    if len(candidates) <= 1:
-        return [bag_path]
-
-    candidates.sort(key=lambda x: x[0])
-    return [p for _, p in candidates]
-
-
-@dataclass
-class SequenceInfo:
-    """Per-bag timing info within a multi-volume sequence."""
-    path: Path
-    start_ns: int
-    end_ns: int
-    duration_s: float
-    gap_from_prev_s: Optional[float] = None
-
-
-def validate_bag_sequence(bags: List[Path]) -> List[SequenceInfo]:
-    """Open each bag to read start/end times and compute inter-bag gaps.
-
-    Returns a list of :class:`SequenceInfo` sorted by start time.
-    """
-    infos: List[SequenceInfo] = []
-    for bag_path in bags:
-        try:
-            with Reader1(bag_path) as reader:
-                start = reader.start_time   # nanoseconds
-                end = reader.end_time
-                duration = (end - start) / 1e9
-                infos.append(SequenceInfo(
-                    path=bag_path,
-                    start_ns=start,
-                    end_ns=end,
-                    duration_s=duration,
-                ))
-        except Exception as exc:
-            print(f"  WARNING: Cannot read {bag_path.name}: {exc}",
-                  file=sys.stderr)
-
-    infos.sort(key=lambda x: x.start_ns)
-    for i in range(1, len(infos)):
-        infos[i].gap_from_prev_s = (
-            infos[i].start_ns - infos[i - 1].end_ns
-        ) / 1e9
-
-    return infos
-
-
-def _print_sequence_summary(
-    seq_infos: List[SequenceInfo],
-) -> None:
-    """Print a human-readable sequence summary to stdout."""
-    total_dur = sum(si.duration_s for si in seq_infos)
-    total_start = seq_infos[0].start_ns / 1e9
-    total_end = seq_infos[-1].end_ns / 1e9
-
-    print(f"\n{'='*72}")
-    print(f"  SEQUENCE SUMMARY  ({len(seq_infos)} bags, "
-          f"total duration: {total_dur:.1f}s)")
-    print(f"{'='*72}")
-    for i, si in enumerate(seq_infos):
-        rel_start = (si.start_ns / 1e9) - total_start
-        rel_end = (si.end_ns / 1e9) - total_start
-        gap_str = ""
-        if si.gap_from_prev_s is not None:
-            g = si.gap_from_prev_s
-            ok = "✓" if abs(g) < 1.0 else ("⚠ overlap" if g < 0 else "⚠ gap")
-            gap_str = f"  gap: {g:.3f}s {ok}"
-        print(f"  [{i}] {si.path.name:40s}  "
-              f"[{rel_start:8.1f}s .. {rel_end:8.1f}s]  "
-              f"dur: {si.duration_s:7.1f}s{gap_str}")
-    print()
+# Sequence detection imported from mandeye_common:
+#   _extract_seq_prefix, detect_bag_sequence, SequenceInfo,
+#   validate_bag_sequence, _print_sequence_summary
 
 
 # ============================================================================
@@ -1581,29 +1372,17 @@ def main():
                    help="Show detailed per-criterion breakdown")
     p.add_argument("--json", metavar="FILE",
                    help="Write machine-readable audit results to a JSON file")
-    seq_grp = p.add_mutually_exclusive_group()
-    seq_grp.add_argument(
-        "--sequence", action="store_true", default=None,
-        help="Process all bags in the detected sequence (multi-volume)",
-    )
-    seq_grp.add_argument(
-        "--no-sequence", action="store_true",
-        help="Suppress sequence detection; process only the given file",
-    )
+    add_sequence_args(p)
     args = p.parse_args()
 
     bag_path = Path(args.bag)
 
     # --- Variant C: directory of .bag files ---
-    is_dir_of_bags = False
-    dir_bags: List[Path] = []
-    if bag_path.is_dir() and not any(bag_path.glob("metadata.yaml")):
-        # Not a ROS2 bag folder — check if it contains .bag files
-        dir_bags = sorted(bag_path.glob("*.bag"))
-        if dir_bags:
-            is_dir_of_bags = True
-            bag_path = dir_bags[0]  # use first as anchor
-            print(f"Directory contains {len(dir_bags)} .bag file(s)")
+    dir_bags = detect_dir_bags(bag_path)
+    is_dir_of_bags = bool(dir_bags)
+    if is_dir_of_bags:
+        bag_path = dir_bags[0]  # use first as anchor
+        print(f"Directory contains {len(dir_bags)} .bag file(s)")
 
     is_ros1 = bag_path.suffix == ".bag"
 
