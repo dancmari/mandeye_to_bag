@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-mandeye_bag_extract.py  v0.1 — Selective topic extraction from ROS bag files.
+mandeye_bag_extract.py  v0.2 — Selective topic extraction from ROS bag files.
 
 Reads a ROS1 (.bag) or ROS2 bag and exports chosen topics to a filtered bag
 file and/or CSV files, with automatic topic-type identification.
@@ -810,6 +810,8 @@ Data export (--format csv / both):
   pointcloud (PointCloud2, CustomMsg)  ->  LAZ (compressed point cloud)
   compressed_image (CompressedImage)   ->  jpg/png/tif/bmp/webp (original)
   image (Image)                        ->  PNG or TIFF (requires Pillow)
+
+Note: --format bag always writes a ROS1 .bag, even if the source is a ROS2 bag.
 
 Examples:
   python mandeye_bag_extract.py recording.bag --list

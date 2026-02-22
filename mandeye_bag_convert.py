@@ -45,6 +45,10 @@ Options:
   --imu_topic <t>         Topic for IMU messages    (default: /livox/imu)
   --chunk_len <sec>       Chunk length in seconds   (default: 20)
   --emulate_point_ts      Interpolate per-point timestamps from header ts
+  --list_topics           Only list topics in the bag, don't convert
+  --imu_id <N>            IMU ID for .sn files / CSV lines (default: 0)
+  --serial <str>          Lidar serial for .sn files (default: XXXXXXXXXX)
+  --csv_delim <char>      CSV delimiter for IMU files (default: space)
   --acc_unit <unit>       Accelerometer unit: m/s2, g, mg, mm/s2 (auto-detect)
   --gyro_unit <unit>      Gyroscope unit: rad/s, deg/s (auto-detect)
   --audit-json <file>     Read audit JSON for auto topic + unit selection

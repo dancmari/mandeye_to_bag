@@ -42,7 +42,7 @@ Multi-volume sequences:
 Pipeline (audit → convert with auto unit conversion):
   python mandeye_bag_audit.py  recording.bag --json audit.json
   python mandeye_bag_convert.py recording.bag output ros1-to-hdmapping --audit-json audit.json
-"""""
+"""
 
 from __future__ import annotations
 

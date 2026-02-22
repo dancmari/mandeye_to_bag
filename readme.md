@@ -56,3 +56,55 @@ chmod +x mandeye-convert.sh
 ./mandeye-convert.sh <input_ros1_bag> <output_folder> ros1-to-hdmapping
 ./mandeye-convert.sh <input_ros2_folder> <output_folder> ros2-to-hdmapping
 ```
+
+---
+
+## Python tools (standalone, no ROS needed)
+
+Three standalone Python scripts provide the same conversion capabilities
+**without Docker or a ROS installation** — only pure-Python packages are
+required.
+
+### Install dependencies
+
+```shell
+pip install rosbags numpy "laspy[lazrs]"
+# optional – for raw Image export:
+pip install Pillow
+```
+
+### Scripts
+
+| Script | Purpose |
+|--------|---------|
+| `mandeye_bag_audit.py` | Audit a ROS bag: score every (PointCloud, IMU) pair, detect units, export JSON |
+| `mandeye_bag_convert.py` | Convert between MandEye datasets and ROS1/ROS2 bag files |
+| `mandeye_bag_extract.py` | Extract selected topics to a filtered bag and/or CSV/LAZ/image files |
+| `mandeye_bag_common.py` | Shared library used by the three scripts above |
+
+### Quick examples
+
+```shell
+# Audit a bag (human report + machine-readable JSON):
+python mandeye_bag_audit.py recording.bag --json audit.json
+
+# Convert ROS1 bag → MandEye (auto topics + units from audit):
+python mandeye_bag_convert.py recording.bag output ros1-to-hdmapping --audit-json audit.json
+
+# Convert MandEye → ROS1 bag:
+python mandeye_bag_convert.py ./my_dataset ./output.bag hdmapping-to-ros1
+
+# Convert MandEye → ROS2 bag:
+python mandeye_bag_convert.py ./my_dataset ./output_ros2 hdmapping-to-ros2
+
+# Extract specific topics to LAZ / CSV / images:
+python mandeye_bag_extract.py recording.bag -o out --topics "/livox/*" --format csv
+
+# List topics in a bag:
+python mandeye_bag_extract.py recording.bag --list
+
+# Multi-volume sequence:
+python mandeye_bag_convert.py recording_0.bag output ros1-to-hdmapping --sequence
+```
+
+Run any script with `--help` for the full list of options.
