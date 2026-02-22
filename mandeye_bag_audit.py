@@ -1534,7 +1534,7 @@ def _write_json(
     pairs_sorted = sorted(pairs, key=lambda p: p.total, reverse=True)
 
     data: Dict[str, Any] = {
-        "audit_version": "0.7",
+        "audit_version": "0.8",
         "bag": bag_path,
         "topics": [
             {"topic": s.topic, "msgtype": s.msgtype, "msgcount": s.msgcount}

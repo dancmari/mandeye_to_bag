@@ -7,6 +7,8 @@ file and/or CSV files, with automatic topic-type identification.
 
 Supported output formats (--format):
   bag   — write a new ROS1 bag containing only the selected topics
+          (Note: the filtered bag is always written in ROS1 format,
+           even when the source is a ROS2 bag.)
   csv   — write per-topic data files:
            • IMU, NavSatFix, NMEA, Odometry, TF → CSV
            • PointCloud2, Livox CustomMsg → LAZ (compressed point cloud)
@@ -130,7 +132,6 @@ from mandeye_bag_common import (
     is_imu_type, is_pc_type, is_custom_msg, is_navsatfix_type, is_nmea_type,
     is_odometry_type, is_tf_type,
     is_image_type, is_compressed_image_type,
-    rostime_to_nsec as _rostime_to_nsec,
     detect_bag_sequence,
     validate_bag_sequence,
     print_sequence_summary,
@@ -282,7 +283,7 @@ def _parse_pointcloud2_points(
     data = bytes(msg.data)
     ps = msg.point_step
     n = msg.width * msg.height
-    header_ts_ns = _rostime_to_nsec(msg.header.stamp)
+    header_ts_ns = rostime_to_nsec(msg.header.stamp)
 
     points: List[Tuple[float, float, float, float, float]] = []
     for idx in range(n):

@@ -180,7 +180,7 @@ def is_image_type(msgtype: str) -> bool:
 
 def is_compressed_image_type(msgtype: str) -> bool:
     """Return *True* for ``sensor_msgs/CompressedImage``."""
-    return "CompressedImage" in msgtype
+    return "sensor_msgs" in msgtype and "CompressedImage" in msgtype
 
 
 def is_navsatfix_type(msgtype: str) -> bool:
@@ -409,9 +409,22 @@ def validate_bag_sequence(bags: List[Path]) -> List[SequenceInfo]:
                     end_ns=end,
                     duration_s=duration,
                 ))
-        except Exception as exc:
-            print(f"  WARNING: Cannot read {bag_path.name}: {exc}",
-                  file=sys.stderr)
+        except Exception:
+            # Reader1 failed — try Reader2 (ROS 2 bag)
+            try:
+                with Reader2(bag_path) as reader:
+                    start = reader.start_time
+                    end = reader.end_time
+                    duration = (end - start) / 1e9
+                    infos.append(SequenceInfo(
+                        path=bag_path,
+                        start_ns=start,
+                        end_ns=end,
+                        duration_s=duration,
+                    ))
+            except Exception as exc:
+                print(f"  WARNING: Cannot read {bag_path.name}: {exc}",
+                      file=sys.stderr)
 
     infos.sort(key=lambda x: x.start_ns)
     for i in range(1, len(infos)):
