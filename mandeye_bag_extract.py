@@ -10,7 +10,9 @@ Supported output formats (--format):
   csv   — write per-topic data files:
            • IMU, NavSatFix, NMEA, Odometry, TF → CSV
            • PointCloud2, Livox CustomMsg → LAZ (compressed point cloud)
-  both  — produce both a filtered bag AND data files (CSV + LAZ)
+           • CompressedImage → original format (jpg/png/tif/bmp/webp)
+           • Image → PNG or TIFF (requires Pillow)
+  both  — produce both a filtered bag AND data files
 
 Topic selection (--topics):
   Specify one or more topic names or glob patterns.
@@ -32,7 +34,7 @@ Multi-volume / split bag sequences:
 Listing mode:
   --list        show all topics with type classification and exit
 
-Dependencies:  pip install rosbags numpy laspy[lazrs]
+Dependencies:  pip install rosbags numpy laspy[lazrs] Pillow
 
 Usage:
   python mandeye_bag_extract.py recording.bag --list
@@ -62,6 +64,11 @@ try:
 except ImportError:
     laspy = None  # LAZ export unavailable
 
+try:
+    from PIL import Image as PILImage
+except ImportError:
+    PILImage = None  # raw Image export unavailable (compressed still works)
+
 from mandeye_bag_common import (
     Reader1, Reader1Error, Reader2,
     Writer1,
@@ -72,6 +79,7 @@ from mandeye_bag_common import (
     classify_topic,
     is_imu_type, is_pc_type, is_custom_msg, is_navsatfix_type, is_nmea_type,
     is_odometry_type, is_tf_type,
+    is_image_type, is_compressed_image_type,
     rostime_to_nsec as _rostime_to_nsec,
     detect_bag_sequence,
     validate_bag_sequence,
@@ -286,6 +294,122 @@ def _write_pointcloud_laz(
 
 
 # ============================================================================
+# Image export
+# ============================================================================
+
+# Map compressed_image format string → file extension
+_COMPRESSED_FMT_EXT: Dict[str, str] = {
+    "jpeg": ".jpg", "jpg": ".jpg",
+    "png": ".png",
+    "tiff": ".tif", "tif": ".tif",
+    "bmp": ".bmp",
+    "webp": ".webp",
+}
+
+
+def _image_dir(output_dir: str, topic: str) -> str:
+    """Return (and create) a per-topic subfolder for image files."""
+    safe = topic.strip("/").replace("/", "_")
+    d = os.path.join(output_dir, safe)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _ts_filename(timestamp_ns: int) -> str:
+    """Build a zero-padded filename from a nanosecond timestamp."""
+    sec = timestamp_ns // 1_000_000_000
+    nsec = timestamp_ns % 1_000_000_000
+    return f"{sec:010d}_{nsec:09d}"
+
+
+def _save_compressed_image(
+    output_dir: str, topic: str, msg: Any, timestamp_ns: int,
+) -> Optional[str]:
+    """Save a CompressedImage message to disk.  Returns path or None."""
+    fmt_raw = getattr(msg, "format", "jpeg")
+    # format can be e.g. "jpeg", "png", or "jpeg; quality=90"
+    fmt_key = fmt_raw.split(";")[0].strip().lower()
+    ext = _COMPRESSED_FMT_EXT.get(fmt_key, "." + fmt_key)
+
+    img_dir = _image_dir(output_dir, topic)
+    fname = _ts_filename(timestamp_ns) + ext
+    path = os.path.join(img_dir, fname)
+
+    data = bytes(msg.data)
+    if not data:
+        return None
+    with open(path, "wb") as f:
+        f.write(data)
+    return path
+
+
+# Encoding → (PIL mode, bytes-per-channel, channels, needs_swap)
+_RAW_ENC_MAP: Dict[str, Tuple[str, int, int, bool]] = {
+    "mono8":   ("L",    1, 1, False),
+    "8UC1":    ("L",    1, 1, False),
+    "mono16":  ("I;16", 2, 1, False),
+    "16UC1":   ("I;16", 2, 1, False),
+    "rgb8":    ("RGB",  1, 3, False),
+    "8UC3":    ("RGB",  1, 3, False),
+    "bgr8":    ("RGB",  1, 3, True),
+    "rgba8":   ("RGBA", 1, 4, False),
+    "bgra8":   ("RGBA", 1, 4, True),
+}
+
+
+def _save_raw_image(
+    output_dir: str, topic: str, msg: Any, timestamp_ns: int,
+) -> Optional[str]:
+    """Save a sensor_msgs/Image message to disk.  Returns path or None."""
+    if PILImage is None:
+        return None
+
+    encoding = getattr(msg, "encoding", "").lower()
+    height = msg.height
+    width = msg.width
+    data = bytes(msg.data)
+    if not data or height == 0 or width == 0:
+        return None
+
+    enc_info = _RAW_ENC_MAP.get(encoding)
+    if enc_info is None:
+        # Unknown encoding — save raw bytes with .raw extension
+        img_dir = _image_dir(output_dir, topic)
+        fname = _ts_filename(timestamp_ns) + f".{encoding}.raw"
+        path = os.path.join(img_dir, fname)
+        with open(path, "wb") as f:
+            f.write(data)
+        return path
+
+    pil_mode, bpc, channels, needs_swap = enc_info
+
+    try:
+        arr = np.frombuffer(data, dtype=np.uint8 if bpc == 1 else np.uint16)
+        arr = arr.reshape((height, width, channels) if channels > 1
+                          else (height, width))
+        if needs_swap and channels >= 3:
+            # BGR(A) → RGB(A): swap R and B channels
+            arr = arr.copy()
+            arr[..., 0], arr[..., 2] = arr[..., 2].copy(), arr[..., 0].copy()
+
+        img = PILImage.fromarray(arr, mode=pil_mode)
+
+        # Choose output format: 16-bit → TIFF, else PNG
+        if bpc == 2:
+            ext = ".tif"
+        else:
+            ext = ".png"
+
+        img_dir = _image_dir(output_dir, topic)
+        fname = _ts_filename(timestamp_ns) + ext
+        path = os.path.join(img_dir, fname)
+        img.save(path)
+        return path
+    except Exception:
+        return None
+
+
+# ============================================================================
 # Extraction core
 # ============================================================================
 
@@ -343,6 +467,8 @@ def extract_from_bag(
         t: [] for t in topic_names
         if topic_meta[t]["category"] == "pointcloud"
     }
+    img_counts: Dict[str, int] = {}
+    img_dirs: Dict[str, str] = {}
     msg_counts: Dict[str, int] = {t: 0 for t in topic_names}
     warnings: List[str] = []
 
@@ -384,7 +510,7 @@ def extract_from_bag(
                         if writer is not None and topic in writer_conns:
                             writer.write(writer_conns[topic], timestamp, rawdata)
 
-                        # Collect CSV / LAZ data
+                        # Collect CSV / LAZ / image data
                         if write_csv:
                             cat = topic_meta[topic]["category"]
                             if cat == "pointcloud" and topic in pc_points:
@@ -399,6 +525,45 @@ def extract_from_bag(
                                             msg, cur_is_ros1,
                                         )
                                     pc_points[topic].extend(pts)
+                            elif cat == "compressed_image":
+                                msg = _deserialize_msg(
+                                    rawdata, conn.msgtype, cur_is_ros1,
+                                )
+                                if msg is not None:
+                                    p = _save_compressed_image(
+                                        output_dir, topic, msg, timestamp,
+                                    )
+                                    if p:
+                                        img_counts[topic] = (
+                                            img_counts.get(topic, 0) + 1
+                                        )
+                                        if topic not in img_dirs:
+                                            img_dirs[topic] = os.path.dirname(p)
+                            elif cat == "image":
+                                if PILImage is not None:
+                                    msg = _deserialize_msg(
+                                        rawdata, conn.msgtype, cur_is_ros1,
+                                    )
+                                    if msg is not None:
+                                        p = _save_raw_image(
+                                            output_dir, topic, msg, timestamp,
+                                        )
+                                        if p:
+                                            img_counts[topic] = (
+                                                img_counts.get(topic, 0) + 1
+                                            )
+                                            if topic not in img_dirs:
+                                                img_dirs[topic] = os.path.dirname(p)
+                                else:
+                                    # Warn once per topic
+                                    _k = f"_pil_warn_{topic}"
+                                    if _k not in img_dirs:
+                                        img_dirs[_k] = ""
+                                        w = ("WARNING: Pillow not installed, "
+                                             f"cannot export raw Image topic {topic}. "
+                                             "Install with: pip install Pillow")
+                                        print(f"  {w}")
+                                        warnings.append(w)
                             elif cat in ("imu", "navsatfix", "nmea",
                                          "odometry", "tf"):
                                 msg = _deserialize_msg(
@@ -439,6 +604,14 @@ def extract_from_bag(
                 laz_files[topic] = path
                 print(f"  LAZ: {path}  ({n:,} points)")
 
+    # --- Image summary ---
+    if write_csv:
+        for topic in sorted(img_counts):
+            n = img_counts[topic]
+            d = img_dirs.get(topic, "")
+            if n > 0:
+                print(f"  Images: {d}  ({n:,} files)")
+
     # --- Write CSV files ---
     csv_files: Dict[str, str] = {}
     if write_csv:
@@ -472,6 +645,8 @@ def extract_from_bag(
                 "messages": msg_counts.get(t["topic"], 0),
                 "csv_file": csv_files.get(t["topic"]),
                 "laz_file": laz_files.get(t["topic"]),
+                "image_dir": img_dirs.get(t["topic"]),
+                "image_count": img_counts.get(t["topic"], 0),
             }
             for t in selected_topics
         ],
@@ -582,6 +757,8 @@ Topic type categories (auto-detected):
 Data export (--format csv / both):
   imu, navsatfix, nmea, odometry, tf  ->  CSV files
   pointcloud (PointCloud2, CustomMsg)  ->  LAZ (compressed point cloud)
+  compressed_image (CompressedImage)   ->  jpg/png/tif/bmp/webp (original)
+  image (Image)                        ->  PNG or TIFF (requires Pillow)
 
 Examples:
   python mandeye_bag_extract.py recording.bag --list
@@ -589,6 +766,7 @@ Examples:
   python mandeye_bag_extract.py recording.bag -o out --topics "/livox/*" --format both
   python mandeye_bag_extract.py recording.bag -o out --topics /imu --format csv
   python mandeye_bag_extract.py recording.bag -o out --topics /livox/lidar --format csv  # LAZ
+  python mandeye_bag_extract.py recording.bag -o out --topics /camera/image --format csv  # images
   python mandeye_bag_extract.py ./bag_dir/ -o out --topics "*" --format bag --sequence
 """,
     )
