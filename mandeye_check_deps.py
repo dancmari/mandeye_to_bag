@@ -133,30 +133,43 @@ def check_rosbags_internals() -> bool:
 
 
 def check_laspy_lazrs() -> bool:
-    """Check that laspy has LazBackend (lazrs or laszip) available."""
+    """Check that laspy is present and a LAZ compression backend is available."""
     try:
         import laspy
-        backends = []
-        try:
-            from laspy.laszip import LazrsBackend  # noqa: F401
-            backends.append("lazrs")
-        except ImportError:
-            pass
-        try:
-            from laspy.laszip import LasZipBackend  # noqa: F401
-            backends.append("laszip")
-        except ImportError:
-            pass
-        if backends:
-            ok(f"laspy {laspy.__version__}  (LAZ backends: {', '.join(backends)})")
-            return True
-        warn(f"laspy {laspy.__version__} — no LAZ backend (lazrs/laszip).  "
-             "Install with:  pip install \"laspy[lazrs]\"")
-        return False
     except ImportError:
         fail("laspy not found (required)")
         info("  Install with:  pip install \"laspy[lazrs]\"")
         return False
+
+    # Detect available LAZ backends — try each known package separately.
+    backends = []
+    try:
+        import lazrs  # noqa: F401
+        backends.append("lazrs")
+    except ImportError:
+        pass
+    try:
+        import laszip  # noqa: F401
+        backends.append("laszip")
+    except ImportError:
+        pass
+
+    # Fallback: laspy 2.x may expose backend info via LasData / compression
+    if not backends:
+        try:
+            from laspy.compression import LazrsPayloadCompressor  # noqa: F401
+            backends.append("lazrs (internal)")
+        except ImportError:
+            pass
+
+    if backends:
+        ok(f"laspy {laspy.__version__}  (LAZ backends: {', '.join(backends)})")
+        return True
+
+    warn(f"laspy {laspy.__version__} — no LAZ backend found.")
+    info("  Install lazrs with:  pip install \"laspy[lazrs]\"")
+    info("  Note: reading/writing .laz files will fail without a backend.")
+    return False
 
 
 def check_companion_scripts() -> bool:
