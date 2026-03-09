@@ -138,6 +138,8 @@ class PointXYZIT(NamedTuple):
     z: float
     intensity: float
     timestamp: float  # seconds
+    tag: int = 0       # Livox return tag (0 = normal) → LAZ classification
+    lidar_id: int = 0  # sensor index (0-based)       → LAZ user_data
 
 
 class ImuSample(NamedTuple):
@@ -171,10 +173,12 @@ def load_laz(path: str) -> List[PointXYZIT]:
         timestamps = np.array(las.gps_time, dtype=np.float64)
     else:
         timestamps = np.zeros(len(xs), dtype=np.float64)
+    tags = np.array(las.classification, dtype=np.uint8) if hasattr(las, "classification") else np.zeros(len(xs), dtype=np.uint8)
+    lidar_ids = np.array(las.user_data, dtype=np.uint8) if hasattr(las, "user_data") else np.zeros(len(xs), dtype=np.uint8)
 
     points = []
     for i in range(len(xs)):
-        points.append(PointXYZIT(xs[i], ys[i], zs[i], intensities[i], timestamps[i]))
+        points.append(PointXYZIT(xs[i], ys[i], zs[i], intensities[i], timestamps[i], int(tags[i]), int(lidar_ids[i])))
     return points
 
 
@@ -188,6 +192,8 @@ def save_laz(path: str, points: List[PointXYZIT]) -> None:
     zs = np.array([p.z for p in points], dtype=np.float64)
     intensities = np.array([p.intensity for p in points], dtype=np.uint16)
     timestamps = np.array([p.timestamp for p in points], dtype=np.float64)
+    tags = np.array([p.tag for p in points], dtype=np.uint8)
+    lidar_ids = np.array([p.lidar_id for p in points], dtype=np.uint8)
 
     header = laspy.LasHeader(point_format=1, version="1.2")
     header.offsets = [np.min(xs), np.min(ys), np.min(zs)]
@@ -201,6 +207,8 @@ def save_laz(path: str, points: List[PointXYZIT]) -> None:
     las.z = zs
     las.intensity = intensities
     las.gps_time = timestamps * 1e-9  # store as seconds (matching C++ saveLaz)
+    las.classification = tags          # Livox return tag → matches HDMapping instrument
+    las.user_data = lidar_ids          # sensor index     → matches HDMapping instrument
 
     las.write(path)
     print(f"\n  Saved {len(points)} points -> {path}")
@@ -334,13 +342,13 @@ def make_pointcloud2_msg(
 # ---------------------------------------------------------------------------
 # Parse Livox CustomMsg back to points
 # ---------------------------------------------------------------------------
-def parse_custom_msg(msg) -> List[PointXYZIT]:
+def parse_custom_msg(msg, lidar_id: int = 0) -> List[PointXYZIT]:
     """Extract PointXYZIT list from a livox_ros_driver(2)/CustomMsg."""
     points = []
     timebase = msg.timebase  # nanoseconds
     for p in msg.points:
         ts_ns = timebase + p.offset_time
-        points.append(PointXYZIT(p.x, p.y, p.z, float(p.reflectivity), ts_ns))
+        points.append(PointXYZIT(p.x, p.y, p.z, float(p.reflectivity), ts_ns, int(p.tag), lidar_id))
     return points
 
 
