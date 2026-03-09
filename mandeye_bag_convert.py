@@ -207,7 +207,7 @@ def save_laz(path: str, points: List[PointXYZIT]) -> None:
     las.z = zs
     las.intensity = intensities
     las.gps_time = timestamps * 1e-9  # store as seconds (matching C++ saveLaz)
-    las.classification = tags          # Livox return tag → matches HDMapping instrument
+    las.classification = tags & np.uint8(0x1F)  # LAS 1.2 classification = 5-bit (max 31); Livox tag upper bits are reserved
     las.user_data = lidar_ids          # sensor index     → matches HDMapping instrument
 
     las.write(path)
