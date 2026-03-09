@@ -640,13 +640,14 @@ def _bag_to_hdmapping(
                     pass
 
                 acc_unit, acc_s2mps2 = _guess_acc_unit(np.array(acc_mags))
-                gyro_unit, gyro_s2radps = _guess_gyro_unit(np.array(gyro_mags))
-                acc_factor, gyro_factor = _compute_imu_factors(
-                    acc_unit, acc_s2mps2, gyro_unit, gyro_s2radps,
+                gyro_unit, gyro_s2radps = _guess_gyro_unit(
+                    np.array(gyro_mags), np.array(acc_mags)
                 )
-                print(f"  IMU units detected (auto):")
-                print(f"    Accel:  {acc_unit}  (x{acc_factor:.6f} -> g)")
-                print(f"    Gyro:   {gyro_unit}  (x{gyro_factor:.6f} -> deg/s)")
+                # No automatic conversion — keep values as-is from the bag.
+                # acc_factor and gyro_factor remain 1.0.
+                print(f"  IMU units (probable, auto-detected — no conversion applied):")
+                print(f"    Accel:  {acc_unit}  (use --acc_unit to enable conversion to g)")
+                print(f"    Gyro:   {gyro_unit}  (use --gyro_unit to enable conversion to deg/s)")
             units_detected = True
 
         # --- Frame rate estimation (once, if --emulate_point_ts) ---

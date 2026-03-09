@@ -69,6 +69,7 @@ from mandeye_bag_common import (
     is_custom_msg as _is_custom_msg,
     guess_acc_unit as _guess_acc_unit,
     guess_gyro_unit as _guess_gyro_unit,
+    _G,
     extract_seq_prefix as _extract_seq_prefix,
     detect_bag_sequence,
     SequenceInfo,
@@ -455,7 +456,8 @@ def _sample_bag(bag_path: Path, max_msgs: int, is_ros1: bool) -> Dict[str, Topic
                 )
             if stats.gyro_magnitudes:
                 stats.gyro_unit, stats.gyro_scale = _guess_gyro_unit(
-                    np.array(stats.gyro_magnitudes)
+                    np.array(stats.gyro_magnitudes),
+                    np.array(stats.acc_magnitudes) if stats.acc_magnitudes else None,
                 )
 
     topics.update(relevant)
@@ -1155,16 +1157,32 @@ def print_report(
             if s.acc_magnitudes:
                 raw_m = float(np.mean(s.acc_magnitudes))
                 si_m = raw_m * s.acc_scale
+                g_m = si_m / _G
+                conv_hint = (
+                    "already g — no conversion needed"
+                    if s.acc_unit == "g"
+                    else f"export target: g  → use --acc_unit {s.acc_unit}"
+                    if s.acc_unit != "?"
+                    else "unit unknown — specify --acc_unit"
+                )
                 print(
                     f"        |accel|:     {raw_m:.3f} {s.acc_unit} "
-                    f"(= {si_m:.2f} m/s²)"
+                    f"(= {si_m:.2f} m/s²  /  {g_m:.3f} g)  [{conv_hint}]"
                 )
             if s.gyro_magnitudes:
                 raw_m = float(np.mean(s.gyro_magnitudes))
                 si_m = raw_m * s.gyro_scale
+                degps_m = si_m * (180.0 / math.pi)
+                conv_hint = (
+                    "already deg/s — no conversion needed"
+                    if s.gyro_unit == "deg/s"
+                    else f"export target: deg/s  → use --gyro_unit {s.gyro_unit}"
+                    if s.gyro_unit != "?"
+                    else "unit unknown — specify --gyro_unit"
+                )
                 print(
                     f"        |gyro|:      {raw_m:.5f} {s.gyro_unit} "
-                    f"(= {si_m:.5f} rad/s)"
+                    f"(= {si_m:.5f} rad/s  /  {degps_m:.4f} deg/s)  [{conv_hint}]"
                 )
             if s.field_names:
                 print(f"        PC2 fields:  {', '.join(s.field_names)}")
@@ -1285,11 +1303,26 @@ def print_report(
     if best.total >= 0.30:
         print(f"\n  {'─' * 76}")
         print("  RECOMMENDED COMMAND:")
+        # Resolve IMU unit hints for the best pair
+        imu_stats = relevant.get(best.imu_topic)
+        acc_hint = ""
+        gyro_hint = ""
+        if imu_stats is not None:
+            if imu_stats.acc_unit not in ("g", "?"):
+                acc_hint = f" --acc_unit {imu_stats.acc_unit}"
+            if imu_stats.gyro_unit not in ("deg/s", "?"):
+                gyro_hint = f" --gyro_unit {imu_stats.gyro_unit}"
         print(
             f"  python mandeye_bag_convert.py <bag> <output> ros1-to-hdmapping "
             f"--pointcloud_topic {best.pc_topic} "
             f"--imu_topic {best.imu_topic}"
+            f"{acc_hint}{gyro_hint}"
         )
+        if acc_hint or gyro_hint:
+            print(
+                f"        (unit flags added: output will be converted to "
+                f"Acc → g, Gyro → deg/s)"
+            )
         if abs(best.imu_time_offset_sec) > 0.001:
             print(
                 f"        (note: estimated IMU time offset "
