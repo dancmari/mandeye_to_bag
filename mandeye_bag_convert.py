@@ -508,7 +508,7 @@ def hdmapping_to_ros2(
     output_bag: str,
     num_lines: int = 8,
     imu_topic: str = "/livox/imu",
-    pc_topic: str = "/livox/pointcloud",
+    pc_topic: str = "/livox/lidar",
 ) -> None:
     print(f"Converting MandEye -> ROS2 bag")
     print(f"  Input:  {input_dir}")
@@ -1177,18 +1177,18 @@ IMU unit conversion (bag -> MandEye):
     3. Auto-detection             (samples first 500 IMU messages)
 
 Examples:
-  # MandEye → ROS1 bag:
+  # MandEye -> ROS1 bag:
   python mandeye_bag_convert.py ./my_dataset ./output.bag hdmapping-to-ros1
   python mandeye_bag_convert.py ./my_dataset ./output.bag hdmapping-to-ros1 --imu_topic /imu --pointcloud_topic /points
 
-  # MandEye → ROS2 bag:
+  # MandEye -> ROS2 bag:
   python mandeye_bag_convert.py ./my_dataset ./output_ros2 hdmapping-to-ros2
   python mandeye_bag_convert.py ./my_dataset ./output_ros2 hdmapping-to-ros2 --imu_topic /imu --pointcloud_topic /points
 
-  # ROS1 bag → MandEye:
+  # ROS1 bag -> MandEye:
   python mandeye_bag_convert.py ./output.bag ./extracted   ros1-to-hdmapping
 
-  # ROS2 bag → MandEye:
+  # ROS2 bag -> MandEye:
   python mandeye_bag_convert.py ./output_ros2 ./extracted  ros2-to-hdmapping
 
   # With audit JSON (auto topics + units):
@@ -1207,11 +1207,11 @@ Examples:
   # Start chunk index at 5 (appending to existing dataset):
   python mandeye_bag_convert.py next.bag out ros1-to-hdmapping --start_index 5
 
-  # Round-trip: MandEye → ROS1 → MandEye:
+  # Round-trip: MandEye -> ROS1 -> MandEye:
   python mandeye_bag_convert.py ./dataset ./recording.bag hdmapping-to-ros1
   python mandeye_bag_convert.py ./recording.bag ./extracted ros1-to-hdmapping
 
-  # Round-trip: MandEye → ROS2 → MandEye:
+  # Round-trip: MandEye -> ROS2 -> MandEye:
   python mandeye_bag_convert.py ./dataset ./recording_ros2 hdmapping-to-ros2
   python mandeye_bag_convert.py ./recording_ros2 ./extracted ros2-to-hdmapping
 
@@ -1291,6 +1291,57 @@ Output report:
     )
 
     args = parser.parse_args()
+
+    # ── Validate topic names ──────────────────────────────────────────────
+    _topic_errs: List[str] = []
+    if not args.pointcloud_topic:
+        _topic_errs.append("--pointcloud_topic cannot be empty (default: /livox/lidar)")
+    elif not args.pointcloud_topic.startswith("/"):
+        print(
+            f"WARNING: --pointcloud_topic '{args.pointcloud_topic}' does not start with '/'. "
+            "ROS topics must begin with '/'.",
+            file=sys.stderr,
+        )
+    if not args.imu_topic:
+        _topic_errs.append("--imu_topic cannot be empty (default: /livox/imu)")
+    elif not args.imu_topic.startswith("/"):
+        print(
+            f"WARNING: --imu_topic '{args.imu_topic}' does not start with '/'. "
+            "ROS topics must begin with '/'.",
+            file=sys.stderr,
+        )
+    if _topic_errs:
+        for _e in _topic_errs:
+            print(f"ERROR: {_e}", file=sys.stderr)
+        sys.exit(1)
+
+    # ── Validate input path existence ─────────────────────────────────────
+    _input_p = Path(args.input)
+    if not _input_p.exists():
+        print(f"ERROR: Input path does not exist: {args.input}", file=sys.stderr)
+        sys.exit(1)
+    if args.mode in ("hdmapping-to-ros1", "hdmapping-to-ros2"):
+        if not _input_p.is_dir():
+            print(
+                f"ERROR: Mode '{args.mode}' expects a directory for input, got: {args.input}",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        _laz_count = sum(1 for _ in _input_p.glob("*.laz"))
+        _csv_count = sum(1 for _ in _input_p.glob("*.csv"))
+        if _laz_count == 0 and _csv_count == 0:
+            print(f"ERROR: No .laz or .csv files found in: {args.input}", file=sys.stderr)
+            sys.exit(1)
+        if _laz_count == 0:
+            print(
+                f"WARNING: No .laz files found in '{args.input}' — bag will contain IMU data only",
+                file=sys.stderr,
+            )
+        if _csv_count == 0:
+            print(
+                f"WARNING: No .csv files found in '{args.input}' — bag will contain point clouds only",
+                file=sys.stderr,
+            )
 
     # Apply audit JSON overrides (before any other processing)
     if args.audit_json:

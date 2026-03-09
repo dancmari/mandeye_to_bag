@@ -16,4 +16,5 @@ cmake-build*/
 .vscode/
 __pycache__/
 build/
+build_standalone/
 .venv/
