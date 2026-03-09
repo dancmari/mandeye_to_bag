@@ -81,6 +81,8 @@ import os
 import struct
 import sys
 import concurrent.futures
+import subprocess
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1268,6 +1270,10 @@ Output report:
     )
     add_sequence_args(parser)
     parser.add_argument(
+        "--skip-audit", dest="skip_audit", action="store_true",
+        help="Skip the automatic pre-flight audit (mandeye_bag_audit.py --max_msgs 100)",
+    )
+    parser.add_argument(
         "--start_index", type=int, default=0,
         help="Starting chunk index for exported files (default: 0). "
              "Useful when appending to an existing dataset.",
@@ -1345,6 +1351,43 @@ Output report:
             bag_sequence = dir_bags
             print(f"\n  Directory mode: {len(dir_bags)} .bag files")
             _print_sequence_info(dir_bags)
+            print()
+
+    # ── Auto-audit (pre-flight check) ─────────────────────────────────────
+    _is_bag_to_hdmapping = args.mode in ("ros1-to-hdmapping", "ros2-to-hdmapping")
+    if _is_bag_to_hdmapping and not getattr(args, "skip_audit", False):
+        _audit_script = Path(__file__).resolve().parent / "mandeye_bag_audit.py"
+        if _audit_script.exists():
+            _audit_target = str(bag_sequence[0] if bag_sequence else input_path)
+            print()
+            print("  " + "─" * 58)
+            print(f"  Auto-audit (--max_msgs 100): {Path(_audit_target).name}")
+            print("  " + "─" * 58)
+            _tmp_audit = None
+            _audit_cmd = [sys.executable, str(_audit_script), _audit_target,
+                          "--max_msgs", "100"]
+            # If no explicit units/topics yet, collect audit JSON to apply
+            _need_audit_apply = not args.audit_json and not (args.acc_unit and args.gyro_unit)
+            if _need_audit_apply:
+                _tmp_fd, _tmp_path = tempfile.mkstemp(suffix="_audit.json")
+                os.close(_tmp_fd)
+                _audit_cmd += ["--json", _tmp_path]
+                _tmp_audit = _tmp_path
+            try:
+                subprocess.run(_audit_cmd, check=False)
+                if _tmp_audit and not args.audit_json:
+                    args.audit_json = _tmp_audit
+                    _apply_audit_json(args)
+            except Exception as _ae:
+                print(f"  WARNING: Auto-audit failed: {_ae}", file=sys.stderr)
+            finally:
+                if _tmp_audit:
+                    try:
+                        os.unlink(_tmp_audit)
+                    except OSError:
+                        pass
+                args.audit_json = None  # consumed; don't double-apply
+            print("  " + "─" * 58)
             print()
 
     report: Optional[Dict[str, Any]] = None
