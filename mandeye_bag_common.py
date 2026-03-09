@@ -254,13 +254,47 @@ def guess_acc_unit(magnitudes: np.ndarray) -> Tuple[str, float]:
     return "?", 1.0
 
 
-def guess_gyro_unit(magnitudes: np.ndarray) -> Tuple[str, float]:
+def guess_gyro_unit(
+    magnitudes: np.ndarray,
+    acc_magnitudes: Optional[np.ndarray] = None,
+) -> Tuple[str, float]:
     """Guess gyroscope unit from |gyro| distribution.
+
+    When *acc_magnitudes* is supplied (same length), stationary periods are
+    isolated first — samples where |acc| stays within 15 % of its median.
+    At rest the gyro captures only sensor noise, whose floor differs clearly
+    between units:  rad/s ≈ 0.001–0.05,  deg/s ≈ 0.05–5.  A threshold of
+    0.5 separates them reliably.  Falls back to the overall-p99 heuristic
+    when fewer than 10 stationary samples are available.
 
     Returns ``(unit_label, scale_to_radps)``.
     """
     if len(magnitudes) == 0:
         return "?", 1.0
+
+    if (
+        acc_magnitudes is not None
+        and len(acc_magnitudes) == len(magnitudes)
+        and len(acc_magnitudes) > 0
+    ):
+        acc_median = float(np.median(acc_magnitudes))
+        if acc_median > 0:
+            stationary = np.abs(acc_magnitudes - acc_median) / acc_median < 0.15
+            n_stat = int(np.sum(stationary))
+            if n_stat >= 10:
+                gyro_stat = magnitudes[stationary]
+                p95 = float(np.percentile(gyro_stat, 95))
+                # Empirical thresholds from stationary LiDAR-grade IMU data:
+                #   deg/s at rest: p95 ≈ 0.010 – 0.050  (data: 0.035 deg/s)
+                #   rad/s at rest: p95 ≈ 0.0001 – 0.005  (data: ~0.0006 rad/s)
+                # Threshold 0.010 sits well between the two ranges (3× margin).
+                if p95 < 0.010:
+                    return "rad/s", 1.0
+                if p95 < 500:
+                    return "deg/s", math.pi / 180.0
+                return "?", 1.0
+
+    # Fallback: overall p99 heuristic (no acc data or too few stationary samples)
     p99 = float(np.percentile(magnitudes, 99))
     if p99 < 20:
         return "rad/s", 1.0
