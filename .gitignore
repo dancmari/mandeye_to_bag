@@ -13,3 +13,7 @@ FAST_LIO
 livox_ros_driver
 cmake-build*/
 .idea/
+.vscode/
+__pycache__/
+build/
+.venv/
