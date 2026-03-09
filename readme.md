@@ -131,7 +131,12 @@ python mandeye_bag_convert.py recording_ros2/ out ros2-to-hdmapping --list_topic
 
 # --- Convert bag → MandEye ------------------------------------------------
 
-# Explicit units (recommended):
+# Conversion automatically runs a quick audit first (--max_msgs 100).
+# Detected topics and units are applied automatically.
+# Skip the pre-flight if not needed:
+python mandeye_bag_convert.py recording.bag output ros1-to-hdmapping --skip-audit
+
+# Explicit units (recommended when you already know them):
 python mandeye_bag_convert.py recording.bag output ros1-to-hdmapping \
     --acc_unit m/s2 --gyro_unit rad/s
 
@@ -178,7 +183,11 @@ Run any script with `--help` for the full list of options.
 
 ```
 Priority order for unit selection:
-  1. --acc_unit / --gyro_unit   explicit CLI arguments
+  0. Auto-audit (pre-flight)    mandeye_bag_audit.py --max_msgs 100 runs
+                                automatically before every ros*-to-hdmapping
+                                conversion and fills topics + units if not
+                                already set.  Use --skip-audit to disable.
+  1. --acc_unit / --gyro_unit   explicit CLI arguments (highest priority)
   2. --audit-json               units detected by mandeye_bag_audit.py
   3. Auto-detection             samples first 500 IMU messages;
                                 uses stationary-period analysis (|acc| ≈ 1 g)
