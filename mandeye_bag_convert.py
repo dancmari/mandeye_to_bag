@@ -692,9 +692,9 @@ def _bag_to_hdmapping(
     for bag_path in bag_files:
         print(f"  Processing bag: {bag_path.name}")
 
-        # --- Detect message types and /mandeye/dataset_info ---
+        # ── Pass 0: connection scan (no deserialization) ───────────────────
         has_custom_msg = False
-        bag_has_info_topic = False
+        has_info_topic = False
         with ReaderCls(bag_path) as reader:
             print("  Topics in bag:")
             for c in reader.connections:
@@ -704,30 +704,93 @@ def _bag_to_hdmapping(
                 if c.topic == pc_topic and "CustomMsg" in c.msgtype:
                     has_custom_msg = True
                 if c.topic == _MANDEYE_INFO_TOPIC:
-                    bag_has_info_topic = True
+                    has_info_topic = True
 
-        if bag_has_info_topic:
-            try:
-                with ReaderCls(bag_path) as reader:
-                    for conn, _, raw in reader.messages():
-                        if conn.topic == _MANDEYE_INFO_TOPIC:
-                            import json as _json
-                            info_text = (
-                                _decode_string_ros1(raw) if is_ros1
-                                else _decode_string_cdr(raw)
-                            )
-                            try:
-                                info_obj = _json.loads(info_text)
-                                print(f"  Bag metadata ({_MANDEYE_INFO_TOPIC}):")
-                                for k, v in info_obj.items():
-                                    print(f"    {k}: {v}")
-                            except Exception:
-                                print(f"  Bag metadata ({_MANDEYE_INFO_TOPIC}): {info_text}")
-                            break
-            except Exception:
-                pass
+        # ── Pass 1: unified pre-pass ───────────────────────────────────────
+        # Collects in a single sweep, stopping as soon as all sub-goals done:
+        #   a) /mandeye/dataset_info content          (if topic present)
+        #   b) 500 IMU magnitudes for unit detection  (if not already known)
+        #   c) 20 s of PC timestamps for frame rate   (if --emulate_point_ts)
+        need_imu_detect = not units_detected and not (acc_unit and gyro_unit)
+        need_fr_detect  = emulate_point_ts and not frame_rate_detected
 
-        # --- IMU unit detection (once, from the first bag) ---
+        acc_mags: List[float] = []
+        gyro_mags: List[float] = []
+        header_diffs: List[float] = []
+        _last_hts: float = 0.0   # last PC header timestamp for frame-rate
+        _fr_start: float = 0.0
+
+        goal_info = not has_info_topic   # already done if topic absent
+        goal_imu  = not need_imu_detect
+        goal_fr   = not need_fr_detect
+
+        if need_fr_detect:
+            print("  Emulating point timestamps, collecting framerate...")
+
+        with ReaderCls(bag_path) as reader:
+          try:
+            for conn, _, rawdata in reader.messages():
+                if goal_info and goal_imu and goal_fr:
+                    break  # all sub-goals satisfied — stop early
+
+                # a) dataset metadata (first occurrence only)
+                if not goal_info and conn.topic == _MANDEYE_INFO_TOPIC:
+                    try:
+                        import json as _json
+                        info_text = (
+                            _decode_string_ros1(rawdata) if is_ros1
+                            else _decode_string_cdr(rawdata)
+                        )
+                        try:
+                            info_obj = _json.loads(info_text)
+                            print(f"  Bag metadata ({_MANDEYE_INFO_TOPIC}):")
+                            for k, v in info_obj.items():
+                                print(f"    {k}: {v}")
+                        except Exception:
+                            print(f"  Bag metadata ({_MANDEYE_INFO_TOPIC}): {info_text}")
+                    except Exception:
+                        pass
+                    goal_info = True
+
+                # b) IMU magnitudes for unit detection
+                if not goal_imu and conn.topic == imu_topic and "Imu" in conn.msgtype:
+                    try:
+                        msg = deser_fn(rawdata, conn.msgtype)
+                        ax = msg.linear_acceleration.x
+                        ay = msg.linear_acceleration.y
+                        az = msg.linear_acceleration.z
+                        acc_mags.append(math.sqrt(ax*ax + ay*ay + az*az))
+                        gx = msg.angular_velocity.x
+                        gy = msg.angular_velocity.y
+                        gz = msg.angular_velocity.z
+                        gyro_mags.append(math.sqrt(gx*gx + gy*gy + gz*gz))
+                        if len(acc_mags) >= 500:
+                            goal_imu = True
+                    except Exception:
+                        pass
+
+                # c) PC frame-rate estimation
+                if not goal_fr and conn.topic == pc_topic:
+                    try:
+                        msg = deser_fn(rawdata, conn.msgtype)
+                        ts = rostime_to_sec(msg.header.stamp)
+                        if _last_hts != 0.0:
+                            if _fr_start == 0.0:
+                                _fr_start = _last_hts
+                            diff = ts - _last_hts
+                            if diff > 0:
+                                header_diffs.append(diff)
+                            if ts - _fr_start > 20.0:
+                                goal_fr = True
+                        _last_hts = ts
+                    except Exception:
+                        pass
+
+          except Exception as exc:
+            print(f"  WARNING: Pre-pass read error: {exc}", file=sys.stderr)
+            print("           Continuing with data collected so far ...", file=sys.stderr)
+
+        # ── Finish IMU unit detection ──────────────────────────────────────
         if not units_detected:
             if acc_unit and gyro_unit:
                 _au, acc_s2mps2 = _guess_acc_unit_by_name(acc_unit)
@@ -739,26 +802,6 @@ def _bag_to_hdmapping(
                 print(f"    Accel:  {acc_unit}  (x{acc_factor:.6f} -> g)")
                 print(f"    Gyro:   {gyro_unit}  (x{gyro_factor:.6f} -> deg/s)")
             else:
-                acc_mags: List[float] = []
-                gyro_mags: List[float] = []
-                with ReaderCls(bag_path) as reader:
-                  try:
-                    for conn, timestamp, rawdata in reader.messages():
-                        if conn.topic == imu_topic and "Imu" in conn.msgtype:
-                            msg = deser_fn(rawdata, conn.msgtype)
-                            ax = msg.linear_acceleration.x
-                            ay = msg.linear_acceleration.y
-                            az = msg.linear_acceleration.z
-                            acc_mags.append(math.sqrt(ax*ax + ay*ay + az*az))
-                            gx = msg.angular_velocity.x
-                            gy = msg.angular_velocity.y
-                            gz = msg.angular_velocity.z
-                            gyro_mags.append(math.sqrt(gx*gx + gy*gy + gz*gz))
-                            if len(acc_mags) >= 500:
-                                break
-                  except Exception:
-                    pass
-
                 acc_unit, acc_s2mps2 = _guess_acc_unit(np.array(acc_mags))
                 gyro_unit, gyro_s2radps = _guess_gyro_unit(
                     np.array(gyro_mags), np.array(acc_mags)
@@ -768,35 +811,23 @@ def _bag_to_hdmapping(
                 print(f"  IMU units (probable, auto-detected — no conversion applied):")
                 print(f"    Accel:  {acc_unit}  (use --acc_unit to enable conversion to g)")
                 print(f"    Gyro:   {gyro_unit}  (use --gyro_unit to enable conversion to deg/s)")
+
+            _comp = _rep145_compliance(acc_unit, gyro_unit)
+            _COMP_PRE = {
+                "compliant":     "\033[32m",
+                "partial":       "\033[33m",
+                "non_compliant": "\033[91m",
+                "unknown":       "\033[90m",
+                "n/a":           "\033[90m",
+            }
+            _col = _COMP_PRE.get(_comp["overall"], "")
+            print(f"  REP-145 source bag: {_col}{_comp['overall'].upper().replace('_', ' ')}\033[0m")
+            print(f"    Accel:  {_comp['acc_note']}")
+            print(f"    Gyro:   {_comp['gyro_note']}")
             units_detected = True
 
-        # --- Frame rate estimation (once, if --emulate_point_ts) ---
-        if emulate_point_ts and not frame_rate_detected:
-            print("  Emulating point timestamps, collecting framerate...")
-            header_diffs: List[float] = []
-            last_header_ts = 0.0
-            fr_start_ts = 0.0
-            with ReaderCls(bag_path) as reader:
-              try:
-                for conn, timestamp, rawdata in reader.messages():
-                    if conn.topic == pc_topic:
-                        msg = deser_fn(rawdata, conn.msgtype)
-                        ts = rostime_to_sec(msg.header.stamp)
-                        if last_header_ts != 0.0:
-                            if fr_start_ts == 0.0:
-                                fr_start_ts = last_header_ts
-                            diff = ts - last_header_ts
-                            if diff > 0:
-                                header_diffs.append(diff)
-                            if ts - fr_start_ts > 20.0:
-                                break
-                        last_header_ts = ts
-              except Exception as exc:
-                print(f"  WARNING: Bag read error (truncated/corrupt?): {exc}",
-                      file=sys.stderr)
-                print("           Continuing with data read so far ...",
-                      file=sys.stderr)
-
+        # ── Finish frame-rate estimation ───────────────────────────────────
+        if need_fr_detect:
             if header_diffs:
                 lidar_frame_rate = sum(header_diffs) / len(header_diffs)
                 print(f"  Estimated frame rate: {lidar_frame_rate:.6f}s")
