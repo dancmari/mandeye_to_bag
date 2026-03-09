@@ -906,7 +906,8 @@ def _bag_to_hdmapping(
                     last_imu_ts = rostime_to_sec(msg.header.stamp)
                     total_imu += 1
                     if last_save_ts == 0.0:
-                        last_save_ts = last_imu_ts
+                        last_save_ts = msg_time_sec  # use bag recording time, not header stamp
+                        # (header clock may differ from recording clock — e.g. wrong IMU clock)
 
                 if conn.topic == pc_topic and last_imu_ts > 0:
                     msg = deser_fn(rawdata, conn.msgtype)
