@@ -1089,8 +1089,8 @@ def _save_chunk(
     serial: str = "XXXXXXXXXX",
 ) -> None:
     os.makedirs(output_dir, exist_ok=True)
-    pc_path = os.path.join(output_dir, f"pointcloud_{count:04d}.laz")
-    imu_path = os.path.join(output_dir, f"imu_{count:04d}.csv")
+    pc_path = os.path.join(output_dir, f"lidar{count:04d}.laz")
+    imu_path = os.path.join(output_dir, f"imu{count:04d}.csv")
     sn_path = os.path.join(output_dir, f"lidar{count:04d}.sn")
     print(f"\n  Saving chunk {count} ({len(buffer_pc)} pts, {len(buffer_imu)} IMU)")
     save_laz(pc_path, buffer_pc)
@@ -1372,11 +1372,11 @@ Output report:
             _audit_target = str(bag_sequence[0] if bag_sequence else input_path)
             print()
             print("  " + "─" * 58)
-            print(f"  Auto-audit (--max_msgs 100): {Path(_audit_target).name}")
+            print(f"  Auto-audit (--max_msgs 50): {Path(_audit_target).name}")
             print("  " + "─" * 58)
             _tmp_audit = None
             _audit_cmd = [sys.executable, str(_audit_script), _audit_target,
-                          "--max_msgs", "100"]
+                          "--max_msgs", "50"]
             # If no explicit units/topics yet, collect audit JSON to apply
             _need_audit_apply = not args.audit_json and not (args.acc_unit and args.gyro_unit)
             if _need_audit_apply:

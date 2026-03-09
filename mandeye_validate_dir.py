@@ -272,8 +272,8 @@ def validate_dir(
         print(f"{_FAIL}  Not a directory: {folder}", flush=True)
         sys.exit(1)
 
-    csv_files = sorted(folder.glob("imu_*.csv"))
-    laz_files = sorted(folder.glob("pointcloud_*.laz"))
+    csv_files = sorted(folder.glob("imu*.csv"))
+    laz_files = sorted(folder.glob("lidar*.laz"))
     sn_files  = sorted(folder.glob("*.sn"))
 
     print(f"\n{'='*72}")
@@ -294,7 +294,7 @@ def validate_dir(
     global_issues: List[str] = []
 
     if not all_indices:
-        global_issues.append("No imu_NNNN.csv or pointcloud_NNNN.laz files found.")
+        global_issues.append("No imuNNNN.csv or lidarNNNN.laz files found.")
 
     for idx in all_indices:
         fc = FileCheck(index=idx)
@@ -382,8 +382,8 @@ def validate_dir(
 
         if verbose or not fc.ok:
             csv_rows = fc.csv_info.rows if fc.csv_info else "?"
-            csv_name = fc.csv_path.name if fc.csv_path else f"MISSING imu_{fc.index:04d}.csv"
-            laz_name = fc.laz_path.name if fc.laz_path else f"MISSING pointcloud_{fc.index:04d}.laz"
+            csv_name = fc.csv_path.name if fc.csv_path else f"MISSING imu{fc.index:04d}.csv"
+            laz_name = fc.laz_path.name if fc.laz_path else f"MISSING lidar{fc.index:04d}.laz"
             print(f"  {stat}  [{fc.index:04d}]  {csv_name}  ({csv_rows} rows)  |  {laz_name}  ({laz_pts_str} pts)")
             for issue in fc.issues:
                 print(f"         {_FAIL}  {issue}")
