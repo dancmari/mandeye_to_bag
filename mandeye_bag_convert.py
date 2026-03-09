@@ -192,6 +192,8 @@ def save_laz(path: str, points: List[PointXYZIT]) -> None:
     header = laspy.LasHeader(point_format=1, version="1.2")
     header.offsets = [np.min(xs), np.min(ys), np.min(zs)]
     header.scales = [0.0001, 0.0001, 0.0001]
+    header.file_source_id = 4711       # matches C++ saveLaz
+    header.global_encoding.value = 1   # bit 0: GPS time = Adjusted Standard GPS Time
 
     las = laspy.LasData(header)
     las.x = xs
