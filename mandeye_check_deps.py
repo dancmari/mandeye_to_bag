@@ -37,7 +37,29 @@ _FAIL_COLOR  = "\033[31m"
 _INFO_COLOR  = "\033[36m"
 _RESET_COLOR = "\033[0m"
 
-_use_color = sys.platform != "win32" or "WT_SESSION" in __import__("os").environ
+
+def _enable_ansi_windows() -> bool:
+    """Try to enable VT100/ANSI processing on Windows console. Returns True on success."""
+    try:
+        import ctypes
+        import ctypes.wintypes
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE
+        mode = ctypes.wintypes.DWORD()
+        if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return bool(kernel32.SetConsoleMode(
+                handle, mode.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            ))
+    except Exception:
+        pass
+    return False
+
+
+if sys.platform == "win32":
+    _use_color = sys.stdout.isatty() and _enable_ansi_windows()
+else:
+    _use_color = sys.stdout.isatty()
 
 
 def _colored(prefix: str, msg: str) -> str:
