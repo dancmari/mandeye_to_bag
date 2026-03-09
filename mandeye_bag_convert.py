@@ -80,6 +80,7 @@ import math
 import os
 import struct
 import sys
+import concurrent.futures
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -689,6 +690,9 @@ def _bag_to_hdmapping(
     units_detected = False
     frame_rate_detected = False
 
+    _executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    _save_future: Optional[concurrent.futures.Future] = None  # type: ignore[type-arg]
+
     for bag_path in bag_files:
         print(f"  Processing bag: {bag_path.name}")
 
@@ -912,14 +916,19 @@ def _bag_to_hdmapping(
                             f"(IMU drift: {abs(ts - last_imu_ts):.3f}s)")
 
                 if msg_time_sec - last_save_ts > chunk_len and last_save_ts > 0:
-                    _save_chunk(output_dir, count, buffer_pc, buffer_imu,
-                                csv_delim=csv_delim, imu_id=imu_id,
-                                serial=serial)
-                    total_pts += len(buffer_pc)
-                    buffer_pc.clear()
-                    buffer_imu.clear()
-                    last_save_ts = msg_time_sec
+                    # Swap buffers — main loop continues while chunk is written
+                    pc_snap, imu_snap = buffer_pc, buffer_imu
+                    buffer_pc, buffer_imu = [], []
+                    total_pts += len(pc_snap)
+                    _count_snap = count
                     count += 1
+                    last_save_ts = msg_time_sec
+                    # Drain previous write before submitting next
+                    if _save_future is not None:
+                        _save_future.result()
+                    _save_future = _executor.submit(
+                        _save_chunk, output_dir, _count_snap, pc_snap, imu_snap,
+                        csv_delim, imu_id, serial)
                     _prog_print()
 
                 _now = time.monotonic()
@@ -936,6 +945,10 @@ def _bag_to_hdmapping(
             print("           Saving data read so far ...", file=sys.stderr)
           else:
             _prog_print(final=True)   # normal completion — print final line
+
+    if _save_future is not None:
+        _save_future.result()  # wait for last async chunk write
+    _executor.shutdown(wait=False)  # already drained
 
     if buffer_pc or buffer_imu:
         _save_chunk(output_dir, count, buffer_pc, buffer_imu,
