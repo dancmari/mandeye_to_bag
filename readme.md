@@ -76,10 +76,13 @@ pip install Pillow
 ### Scripts
 
 | Script | Purpose |
-|--------|---------|| `mandeye_check_deps.py` | Validate Python environment and installed dependencies || `mandeye_bag_audit.py` | Audit a ROS bag: score every (PointCloud, IMU) pair, detect units, export JSON |
+|--------|---------|
+| `mandeye_check_deps.py` | Validate Python environment and installed dependencies |
+| `mandeye_bag_audit.py` | Audit a ROS bag: score every (PointCloud, IMU) pair, detect units, REP-145 compliance, export JSON |
 | `mandeye_bag_convert.py` | Convert between MandEye datasets and ROS1/ROS2 bag files |
 | `mandeye_bag_extract.py` | Extract selected topics to a filtered bag and/or CSV/LAZ/image files |
 | `mandeye_imu_rescale.py` | Post-extraction IMU unit fix — rescale acc / gyro / timestamp in CSV files |
+| `mandeye_validate_dir.py` | Validate a MandEye folder before conversion (pairs, timestamps, LAZ integrity) |
 | `mandeye_bag_common.py` | Shared library used by the scripts above |
 
 ### MandEye file format
@@ -107,10 +110,24 @@ python mandeye_check_deps.py
 # auto-install missing required packages:
 python mandeye_check_deps.py --install-missing
 
+# --- Validate folder before conversion ------------------------------------
+
+python mandeye_validate_dir.py ./my_dataset
+# verbose (show per-file details even when OK):
+python mandeye_validate_dir.py ./my_dataset --verbose
+# export validation report as JSON:
+python mandeye_validate_dir.py ./my_dataset --json validate_report.json
+
 # --- Audit ----------------------------------------------------------------
 
 # Audit a bag (human report + machine-readable JSON):
 python mandeye_bag_audit.py recording.bag --json audit.json
+
+# --- Inspect bag topics before converting ---------------------------------
+
+# List all topics with message counts and colour-tagged IMU/PC/metadata:
+python mandeye_bag_convert.py recording.bag out ros1-to-hdmapping --list_topics
+python mandeye_bag_convert.py recording_ros2/ out ros2-to-hdmapping --list_topics
 
 # --- Convert bag → MandEye ------------------------------------------------
 
@@ -171,3 +188,41 @@ Priority order for unit selection:
 
 If the wrong units slipped through into the extracted CSVs, use
 `mandeye_imu_rescale.py` to fix them without re-running the full extraction.
+
+### REP-103 / REP-145 compliance
+
+[ROS REP-103](https://www.ros.org/reps/rep-0103.html) and
+[REP-145](https://www.ros.org/reps/rep-0145.html) mandate SI units for
+`sensor_msgs/Imu`:
+
+| Field | Required unit |
+|-------|--------------|
+| `linear_acceleration` | **m/s²** |
+| `angular_velocity` | **rad/s** |
+
+MandEye CSV files intentionally use **g** (accel) and **deg/s** (gyro) for
+human readability. Bags produced by the `hdmapping-to-ros1` / `hdmapping-to-ros2`
+converters embed a `/mandeye/dataset_info` topic (`std_msgs/String`, JSON) that
+records the IMU units actually stored in the bag, along with dataset meta-data
+(sensor serial numbers, chunk count, time span).
+
+`mandeye_bag_audit.py` reads that topic (when present) and reports REP-145
+compliance per IMU topic, colour-coded in the terminal output. Use
+`mandeye_imu_rescale.py --acc-conv g2ms --gyro-conv deg2rad` to convert
+extracted CSV files to SI units when a downstream tool requires them.
+
+### Folder validation (`mandeye_validate_dir.py`)
+
+Run this before any conversion to catch problems early:
+
+| Check | What it verifies |
+|-------|-----------------|
+| Pair integrity | every `pointcloud_NNNN.laz` has a matching `imu_NNNN.csv` and vice-versa |
+| Gap detection | chunk index sequence has no missing numbers |
+| CSV monotonicity | IMU timestamps are strictly increasing within each file |
+| LAZ point count | each LAZ file contains at least one point (requires `laspy`) |
+| Timestamp span ratio | ratio of IMU time span to wall-clock span is plausible |
+| Serial-number files | `.sn` side-car files are present and parseable |
+
+Exit code is **0** (all OK) or **1** (one or more issues found), suitable for
+use in shell scripts and CI pipelines.
