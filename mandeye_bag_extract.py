@@ -220,7 +220,7 @@ def _csv_path(output_dir: str, topic: str, suffix: str = ".csv") -> str:
 def _write_imu_csv(path: str, rows: List[List[Any]]) -> int:
     """Write IMU samples to CSV. Returns row count."""
     with open(path, "w", newline="") as f:
-        w = csv_mod.writer(f)
+        w = csv_mod.writer(f, lineterminator="\n")
         w.writerow(["timestamp_s", "gyr_x", "gyr_y", "gyr_z",
                      "acc_x", "acc_y", "acc_z"])
         w.writerows(rows)
@@ -229,7 +229,7 @@ def _write_imu_csv(path: str, rows: List[List[Any]]) -> int:
 
 def _write_navsatfix_csv(path: str, rows: List[List[Any]]) -> int:
     with open(path, "w", newline="") as f:
-        w = csv_mod.writer(f)
+        w = csv_mod.writer(f, lineterminator="\n")
         w.writerow(["timestamp_s", "latitude", "longitude", "altitude",
                      "status", "cov_type"])
         w.writerows(rows)
@@ -238,7 +238,7 @@ def _write_navsatfix_csv(path: str, rows: List[List[Any]]) -> int:
 
 def _write_nmea_csv(path: str, rows: List[List[Any]]) -> int:
     with open(path, "w", newline="") as f:
-        w = csv_mod.writer(f)
+        w = csv_mod.writer(f, lineterminator="\n")
         w.writerow(["timestamp_s", "sentence"])
         w.writerows(rows)
     return len(rows)
@@ -246,7 +246,7 @@ def _write_nmea_csv(path: str, rows: List[List[Any]]) -> int:
 
 def _write_odometry_csv(path: str, rows: List[List[Any]]) -> int:
     with open(path, "w", newline="") as f:
-        w = csv_mod.writer(f)
+        w = csv_mod.writer(f, lineterminator="\n")
         w.writerow(["timestamp_s",
                      "pos_x", "pos_y", "pos_z",
                      "ori_x", "ori_y", "ori_z", "ori_w",
@@ -258,7 +258,7 @@ def _write_odometry_csv(path: str, rows: List[List[Any]]) -> int:
 
 def _write_tf_csv(path: str, rows: List[List[Any]]) -> int:
     with open(path, "w", newline="") as f:
-        w = csv_mod.writer(f)
+        w = csv_mod.writer(f, lineterminator="\n")
         w.writerow(["timestamp_s", "parent_frame", "child_frame",
                      "tx", "ty", "tz", "rx", "ry", "rz", "rw"])
         w.writerows(rows)

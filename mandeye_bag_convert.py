@@ -201,7 +201,7 @@ def save_laz(path: str, points: List[PointXYZIT]) -> None:
     las.gps_time = timestamps * 1e-9  # store as seconds (matching C++ saveLaz)
 
     las.write(path)
-    print(f"  Saved {len(points)} points -> {path}")
+    print(f"\n  Saved {len(points)} points -> {path}")
 
 
 # ---------------------------------------------------------------------------
@@ -271,7 +271,7 @@ def load_imu_csv(path: str, imu_to_use: int = 0) -> List[ImuSample]:
 
 def save_imu_csv(path: str, samples: List[str], delim: str = ",", imu_id: int = 0) -> None:
     """Write IMU lines to a CSV file with the given delimiter, appending imuId."""
-    with open(path, "w") as f:
+    with open(path, "w", newline="\n") as f:
         for line in samples:
             f.write(line + f"{delim}{imu_id}" + "\n")
     print(f"  Saved {len(samples)} IMU samples -> {path}")
@@ -1081,11 +1081,11 @@ def _save_chunk(
     pc_path = os.path.join(output_dir, f"pointcloud_{count:04d}.laz")
     imu_path = os.path.join(output_dir, f"imu_{count:04d}.csv")
     sn_path = os.path.join(output_dir, f"lidar{count:04d}.sn")
-    print(f"  Saving chunk {count} ({len(buffer_pc)} pts, {len(buffer_imu)} IMU)")
+    print(f"\n  Saving chunk {count} ({len(buffer_pc)} pts, {len(buffer_imu)} IMU)")
     save_laz(pc_path, buffer_pc)
     save_imu_csv(imu_path, buffer_imu, delim=csv_delim, imu_id=imu_id)
     # Write serial number file
-    with open(sn_path, "w") as f:
+    with open(sn_path, "w", newline="\n") as f:
         f.write(f"{imu_id} {serial}\n")
     print(f"  Saved serial info -> {sn_path}")
 

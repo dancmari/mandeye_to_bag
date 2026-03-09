@@ -212,7 +212,7 @@ def process_file(
         print(f"    backup: {bak.name}")
 
     new_text = _rows_to_text(header, delim, new_rows)
-    path.write_text(new_text, encoding="utf-8")
+    path.write_text(new_text, encoding="utf-8", newline="")
     print(f"    written.")
     return {"file": path.name, "rows": len(rows), "written": True}
 
@@ -252,7 +252,6 @@ Examples:
 
   # Custom timestamp factor (e.g. ms → s):
   python mandeye_imu_rescale.py --dir ./extracted --time-factor 0.001 --backup""",
-""",
     )
     parser.add_argument("--dir", required=True, metavar="PATH",
                         help="Directory containing IMU CSV files")
