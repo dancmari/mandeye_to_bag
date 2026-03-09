@@ -109,6 +109,14 @@ from mandeye_bag_common import (
     guess_acc_unit_by_name as _guess_acc_unit_by_name,
     guess_gyro_unit_by_name as _guess_gyro_unit_by_name,
     _G, _ACC_UNIT_TABLE, _GYRO_UNIT_TABLE,
+    rep145_compliance as _rep145_compliance,
+    MANDEYE_INFO_TOPIC as _MANDEYE_INFO_TOPIC,
+    _STRING_ROS1_MSGTYPE, _STRING_ROS1_MSGDEF, _STRING_ROS1_MD5SUM,
+    _STRING_ROS2_MSGTYPE,
+    encode_string_ros1 as _encode_string_ros1,
+    encode_string_cdr as _encode_string_cdr,
+    decode_string_ros1 as _decode_string_ros1,
+    decode_string_cdr as _decode_string_cdr,
     extract_seq_prefix as _extract_seq_prefix,
     detect_bag_sequence,
     print_sequence_info as _print_sequence_info,
@@ -443,12 +451,38 @@ def hdmapping_to_ros1(
 
         print(f"  Wrote {total_pc} PointCloud2 messages")
 
+        # Write /mandeye/dataset_info metadata message
+        import json as _json
+        _meta = {
+            "generator": "mandeye_bag_convert.py",
+            "source_format": "hdmapping",
+            "imu_acc_unit": "g",
+            "imu_gyro_unit": "deg/s",
+            "rep145_compliant": False,
+            "rep145_note": (
+                "IMU values are in g (acc) and deg/s (gyro), NOT REP-145 SI units. "
+                "Use mandeye_imu_rescale.py --acc-conv g2ms --gyro-conv deg2rad for ROS consumers expecting SI."
+            ),
+            "rep145_refs": [
+                "https://www.ros.org/reps/rep-0103.html",
+                "https://www.ros.org/reps/rep-0145.html",
+            ],
+        }
+        meta_conn = writer.add_connection(
+            _MANDEYE_INFO_TOPIC, _STRING_ROS1_MSGTYPE,
+            msgdef=_STRING_ROS1_MSGDEF, md5sum=_STRING_ROS1_MD5SUM,
+        )
+        writer.write(meta_conn, 0, _encode_string_ros1(_json.dumps(_meta, ensure_ascii=False)))
+        print(f"  Wrote metadata to {_MANDEYE_INFO_TOPIC}")
+
     print()
     print(f"  \u2500\u2500 Conversion summary \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
     print(f"  Output:  {output_bag}")
     print(f"  Topics:  IMU \u2192 {imu_topic}   |   PC \u2192 {pc_topic}")
     print(f"  Written: {total_imu} IMU messages   |   {total_pc} PointCloud2 messages")
     print(f"  IMU units in CSV:  Accel [g]  |  Gyro [deg/s]  (values written as-is to bag)")
+    print(f"  \033[93mREP-145 NON-COMPLIANT\033[0m  (bag values in g+deg/s, not m/s\u00b2+rad/s)")
+    print(f"  Metadata written to: {_MANDEYE_INFO_TOPIC}")
     print()
     print("Done!")
 
@@ -543,12 +577,39 @@ def hdmapping_to_ros2(
 
         print(f"  Wrote {total_pc} PointCloud2 messages")
 
+        # Write /mandeye/dataset_info metadata message
+        import json as _json
+        _meta2 = {
+            "generator": "mandeye_bag_convert.py",
+            "source_format": "hdmapping",
+            "imu_acc_unit": "g",
+            "imu_gyro_unit": "deg/s",
+            "rep145_compliant": False,
+            "rep145_note": (
+                "IMU values are in g (acc) and deg/s (gyro), NOT REP-145 SI units. "
+                "Use mandeye_imu_rescale.py --acc-conv g2ms --gyro-conv deg2rad for ROS consumers expecting SI."
+            ),
+            "rep145_refs": [
+                "https://www.ros.org/reps/rep-0103.html",
+                "https://www.ros.org/reps/rep-0145.html",
+            ],
+        }
+        meta_conn2 = writer.add_connection(
+            _MANDEYE_INFO_TOPIC,
+            _STRING_ROS2_MSGTYPE,
+            typestore=typestore,
+        )
+        writer.write(meta_conn2, 0, _encode_string_cdr(_json.dumps(_meta2, ensure_ascii=False)))
+        print(f"  Wrote metadata to {_MANDEYE_INFO_TOPIC}")
+
     print()
     print(f"  \u2500\u2500 Conversion summary \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
     print(f"  Output:  {output_bag}")
     print(f"  Topics:  IMU \u2192 {imu_topic}   |   PC \u2192 {pc_topic}")
     print(f"  Written: {total_imu} IMU messages   |   {total_pc} PointCloud2 messages")
     print(f"  IMU units in CSV:  Accel [g]  |  Gyro [deg/s]  (values written as-is to bag)")
+    print(f"  \033[93mREP-145 NON-COMPLIANT\033[0m  (bag values in g+deg/s, not m/s\u00b2+rad/s)")
+    print(f"  Metadata written to: {_MANDEYE_INFO_TOPIC}")
     print()
     print("Done!")
 
@@ -631,8 +692,9 @@ def _bag_to_hdmapping(
     for bag_path in bag_files:
         print(f"  Processing bag: {bag_path.name}")
 
-        # --- Detect message types ---
+        # --- Detect message types and /mandeye/dataset_info ---
         has_custom_msg = False
+        bag_has_info_topic = False
         with ReaderCls(bag_path) as reader:
             print("  Topics in bag:")
             for c in reader.connections:
@@ -641,6 +703,29 @@ def _bag_to_hdmapping(
                 print(f"    {c.topic}  [{c.msgtype}]  {cnt_str}")
                 if c.topic == pc_topic and "CustomMsg" in c.msgtype:
                     has_custom_msg = True
+                if c.topic == _MANDEYE_INFO_TOPIC:
+                    bag_has_info_topic = True
+
+        if bag_has_info_topic:
+            try:
+                with ReaderCls(bag_path) as reader:
+                    for conn, _, raw in reader.messages():
+                        if conn.topic == _MANDEYE_INFO_TOPIC:
+                            import json as _json
+                            info_text = (
+                                _decode_string_ros1(raw) if is_ros1
+                                else _decode_string_cdr(raw)
+                            )
+                            try:
+                                info_obj = _json.loads(info_text)
+                                print(f"  Bag metadata ({_MANDEYE_INFO_TOPIC}):")
+                                for k, v in info_obj.items():
+                                    print(f"    {k}: {v}")
+                            except Exception:
+                                print(f"  Bag metadata ({_MANDEYE_INFO_TOPIC}): {info_text}")
+                            break
+            except Exception:
+                pass
 
         # --- IMU unit detection (once, from the first bag) ---
         if not units_detected:
@@ -817,6 +902,16 @@ def _bag_to_hdmapping(
     print(f"  IMU:     {total_imu} samples")
     print(f"  Accel:   {acc_unit or '(not detected)'}  (\u00d7{acc_factor:.6g} \u2192 g)")
     print(f"  Gyro:    {gyro_unit or '(not detected)'}  (\u00d7{gyro_factor:.6g} \u2192 deg/s)")
+    _comp_src = _rep145_compliance(acc_unit, gyro_unit)
+    _COMP_COL2 = {
+        "compliant":     "\033[32m",
+        "partial":       "\033[33m",
+        "non_compliant": "\033[91m",
+        "unknown":       "\033[90m",
+        "n/a":           "\033[90m",
+    }
+    _col2 = _COMP_COL2.get(_comp_src["overall"], "")
+    print(f"  Source REP-145: {_col2}{_comp_src['overall'].upper().replace('_', ' ')}\033[0m")
     print(f"  Elapsed: {elapsed:.1f}s")
     print()
     return report

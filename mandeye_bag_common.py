@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 import re
+import struct
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -363,8 +364,132 @@ def guess_gyro_unit_by_name(name: str) -> Tuple[str, float]:
 
 
 # ============================================================================
-# Bag sequence detection (multi-volume / split recordings)
+# REP-103 / REP-145 compliance helpers
 # ============================================================================
+
+# Standard: sensor_msgs/Imu must carry SI units per REP-103 + REP-145:
+#   linear_acceleration  → m/s²   (REP-103 SI, gravity ≈ 9.80665 m/s²)
+#   angular_velocity     → rad/s  (REP-103 SI)
+# References:
+#   https://www.ros.org/reps/rep-0103.html  (SI units for ROS)
+#   https://www.ros.org/reps/rep-0145.html  (sensor_msgs/Imu conventions)
+
+_REP145_SI_ACC_UNIT  = "m/s²"   # compliant unit for linear_acceleration
+_REP145_SI_GYRO_UNIT = "rad/s"  # compliant unit for angular_velocity
+_REP145_REFS = (
+    "REP-103: https://www.ros.org/reps/rep-0103.html  "
+    "(SI units for ROS)\n"
+    "REP-145: https://www.ros.org/reps/rep-0145.html  "
+    "(sensor_msgs/Imu: acc in m/s², gyro in rad/s)"
+)
+
+
+def rep145_compliance(
+    acc_unit: str,
+    gyro_unit: str,
+    msgtype: str = "sensor_msgs/msg/Imu",
+) -> Dict[str, Any]:
+    """Evaluate REP-103/145 compliance for an IMU topic.
+
+    Returns a dict with keys:
+      ``acc_ok``, ``gyro_ok``, ``overall`` (str: compliant/partial/non_compliant/unknown),
+      ``acc_note``, ``gyro_note``.
+    """
+    if "Imu" not in msgtype:
+        return {
+            "acc_ok": None, "gyro_ok": None,
+            "overall": "n/a",
+            "acc_note": "Not an Imu message type",
+            "gyro_note": "Not an Imu message type",
+        }
+
+    acc_si  = acc_unit  in ("m/s²", "m/s2")
+    gyro_si = gyro_unit == "rad/s"
+    acc_unk  = acc_unit  == "?"
+    gyro_unk = gyro_unit == "?"
+
+    if acc_si:
+        acc_note = "m/s² ✓  REP-145 compliant"
+    elif acc_unk:
+        acc_note = "unknown — cannot verify"
+    else:
+        factor = _G if acc_unit == "g" else None
+        hint = f" → multiply by {factor:.5g} to get m/s²" if factor else ""
+        acc_note = f"{acc_unit} ✗  NOT compliant (want m/s²){hint}"
+
+    if gyro_si:
+        gyro_note = "rad/s ✓  REP-145 compliant"
+    elif gyro_unk:
+        gyro_note = "unknown — cannot verify"
+    else:
+        factor = math.pi / 180.0 if gyro_unit == "deg/s" else None
+        hint = f" → multiply by π/180 ≈ {factor:.5g} to get rad/s" if factor else ""
+        gyro_note = f"{gyro_unit} ✗  NOT compliant (want rad/s){hint}"
+
+    if acc_unk or gyro_unk:
+        overall = "unknown"
+    elif acc_si and gyro_si:
+        overall = "compliant"
+    elif acc_si or gyro_si:
+        overall = "partial"
+    else:
+        overall = "non_compliant"
+
+    return {
+        "acc_ok": acc_si if not acc_unk else None,
+        "gyro_ok": gyro_si if not gyro_unk else None,
+        "overall": overall,
+        "acc_note": acc_note,
+        "gyro_note": gyro_note,
+    }
+
+
+# ============================================================================
+# Metadata topic  ("/mandeye/dataset_info")
+# ============================================================================
+
+# A std_msgs/String message written to this topic carries JSON metadata
+# about the dataset's IMU units and REP-145 compliance status.
+MANDEYE_INFO_TOPIC = "/mandeye/dataset_info"
+
+# ROS1 connection parameters for std_msgs/String
+_STRING_ROS1_MSGTYPE = "std_msgs/String"
+_STRING_ROS1_MSGDEF  = "string data\n"
+_STRING_ROS1_MD5SUM  = "992ce8a1687cec8c8bd883ec73ca41d1"
+
+# ROS2 message type
+_STRING_ROS2_MSGTYPE = "std_msgs/msg/String"
+
+
+def encode_string_ros1(text: str) -> bytes:
+    """Serialise a std_msgs/String value as raw ROS1 bytes."""
+    b = text.encode("utf-8")
+    return struct.pack("<I", len(b)) + b
+
+
+def encode_string_cdr(text: str) -> bytes:
+    """Serialise a std_msgs/String value as raw CDR bytes (ROS2)."""
+    b = text.encode("utf-8") + b"\x00"   # null-terminated
+    return b"\x00\x01\x00\x00" + struct.pack("<I", len(b)) + b
+
+
+def decode_string_ros1(raw: bytes) -> str:
+    """Deserialise a std_msgs/String from raw ROS1 bytes."""
+    if len(raw) < 4:
+        return ""
+    n = struct.unpack_from("<I", raw, 0)[0]
+    return raw[4:4 + n].decode("utf-8", errors="replace")
+
+
+def decode_string_cdr(raw: bytes) -> str:
+    """Deserialise a std_msgs/String from raw CDR bytes (ROS2)."""
+    if len(raw) < 8:
+        return ""
+    n = struct.unpack_from("<I", raw, 4)[0]
+    return raw[8:8 + n].rstrip(b"\x00").decode("utf-8", errors="replace")
+
+
+
 
 def extract_seq_prefix(stem: str) -> Tuple[str, Optional[int]]:
     """Extract ``(prefix, index)`` from a bag filename stem.

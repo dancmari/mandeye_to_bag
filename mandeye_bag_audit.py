@@ -69,6 +69,11 @@ from mandeye_bag_common import (
     is_custom_msg as _is_custom_msg,
     guess_acc_unit as _guess_acc_unit,
     guess_gyro_unit as _guess_gyro_unit,
+    rep145_compliance as _rep145_compliance,
+    _REP145_REFS,
+    MANDEYE_INFO_TOPIC,
+    _STRING_ROS1_MSGTYPE, _STRING_ROS2_MSGTYPE,
+    decode_string_ros1, decode_string_cdr,
     _G,
     extract_seq_prefix as _extract_seq_prefix,
     detect_bag_sequence,
@@ -257,10 +262,18 @@ class PairScore:
 # ============================================================================
 # SAMPLING
 # ============================================================================
-def _sample_bag(bag_path: Path, max_msgs: int, is_ros1: bool) -> Dict[str, TopicStats]:
-    """Open the bag and sample up to max_msgs per topic."""
+def _sample_bag(
+    bag_path: Path, max_msgs: int, is_ros1: bool,
+) -> Tuple[Dict[str, TopicStats], Optional[str]]:
+    """Open the bag and sample up to max_msgs per topic.
+
+    Returns ``(topics_dict, metadata_json_or_None)``.
+    The *metadata_json_or_None* is the content of the
+    ``/mandeye/dataset_info`` topic if present in the bag.
+    """
     topics: Dict[str, TopicStats] = {}
     counters: Dict[str, int] = {}
+    mandeye_info: Optional[str] = None
 
     ReaderCls = Reader1 if is_ros1 else Reader2
 
@@ -274,13 +287,13 @@ def _sample_bag(bag_path: Path, max_msgs: int, is_ros1: bool) -> Dict[str, Topic
                 )
                 counters[c.topic] = 0
 
-    # Keep only IMU / PC for deep sampling
+    # Keep only IMU / PC for deep sampling (plus /mandeye/dataset_info)
     relevant = {
         t: s for t, s in topics.items()
         if _is_imu_type(s.msgtype) or _is_pc_type(s.msgtype)
     }
     if not relevant:
-        return topics
+        return topics, mandeye_info
 
     deser_fn = _audit_deserialize_ros1 if is_ros1 else _audit_deserialize_cdr
     pc2_ts_checked: Dict[str, bool] = {}   # topic → already checked data buffer?
@@ -290,6 +303,15 @@ def _sample_bag(bag_path: Path, max_msgs: int, is_ros1: bool) -> Dict[str, Topic
     with ReaderCls(bag_path) as reader:
       try:
         for conn, _timestamp, rawdata in reader.messages():
+            # Capture /mandeye/dataset_info if present (once)
+            if conn.topic == MANDEYE_INFO_TOPIC and mandeye_info is None:
+                try:
+                    if is_ros1:
+                        mandeye_info = decode_string_ros1(rawdata)
+                    else:
+                        mandeye_info = decode_string_cdr(rawdata)
+                except Exception:
+                    pass
             if conn.topic not in relevant:
                 continue
             stats = relevant[conn.topic]
@@ -420,6 +442,25 @@ def _sample_bag(bag_path: Path, max_msgs: int, is_ros1: bool) -> Dict[str, Topic
         for stats in relevant.values():
             stats.notes.append("BAG FILE TRUNCATED – partial data only")
 
+    # /mandeye/dataset_info may not be in initial connection scan —
+    # check once more if still not found
+    if mandeye_info is None:
+        with ReaderCls(bag_path) as reader:
+            for c in reader.connections:
+                if c.topic == MANDEYE_INFO_TOPIC:
+                    try:
+                        with ReaderCls(bag_path) as r2:
+                            for conn2, _, raw2 in r2.messages():
+                                if conn2.topic == MANDEYE_INFO_TOPIC:
+                                    mandeye_info = (
+                                        decode_string_ros1(raw2) if is_ros1
+                                        else decode_string_cdr(raw2)
+                                    )
+                                    break
+                    except Exception:
+                        pass
+                    break
+
     # ---- Post-sampling derivations ----
     for stats in relevant.values():
         ts = np.array(stats.header_timestamps)
@@ -461,7 +502,7 @@ def _sample_bag(bag_path: Path, max_msgs: int, is_ros1: bool) -> Dict[str, Topic
                 )
 
     topics.update(relevant)
-    return topics
+    return topics, mandeye_info
 
 
 # ============================================================================
@@ -1055,12 +1096,28 @@ def print_report(
     pairs: List[PairScore],
     top_k: int,
     verbose: bool,
+    mandeye_info: Optional[str] = None,
 ):
     hr = "=" * 80
     print(f"\n{hr}")
     print("  MANDEYE BAG AUDIT REPORT  v0.6")
     print(f"  Bag: {bag_path}")
     print(hr)
+
+    # ---- /mandeye/dataset_info metadata (written by convert tool) ----
+    if mandeye_info:
+        print(f"\n  {'─' * 76}")
+        print("  MANDEYE DATASET METADATA  (/mandeye/dataset_info)")
+        print(f"  {'─' * 76}")
+        try:
+            import json as _json
+            meta = _json.loads(mandeye_info)
+            for k, v in meta.items():
+                print(f"    {k}: {v}")
+        except Exception:
+            # Not JSON — just print raw
+            for line in mandeye_info.splitlines():
+                print(f"    {line}")
 
     # ---- Topic listing ----
     print(f"\n  {'TOPIC':<43} {'TYPE':<38} {'#MSGS':>8}")
@@ -1189,6 +1246,32 @@ def print_report(
             if s.notes:
                 for note in s.notes:
                     print(f"        \033[93mNOTE: {note}\033[0m")
+
+    # ---- REP-103 / REP-145 compliance ----
+    imu_topics_list = [
+        s for s in relevant.values() if _is_imu_type(s.msgtype)
+    ]
+    if imu_topics_list:
+        print(f"\n  {'─' * 76}")
+        print("  REP-103 / REP-145 COMPLIANCE  (sensor_msgs/Imu standard units)")
+        print(f"  {'─' * 76}")
+        print(f"  Standard: linear_acceleration → m/s²  |  angular_velocity → rad/s")
+        print(f"  {_REP145_REFS}")
+        for s in sorted(imu_topics_list, key=lambda x: x.topic):
+            comp = _rep145_compliance(s.acc_unit, s.gyro_unit, s.msgtype)
+            _COMP_COLORS = {
+                "compliant":     "\033[32m",
+                "partial":       "\033[33m",
+                "non_compliant": "\033[91m",
+                "unknown":       "\033[90m",
+                "n/a":           "\033[90m",
+            }
+            col = _COMP_COLORS.get(comp["overall"], "")
+            reset = "\033[0m"
+            print(f"\n  {s.topic}  [{s.msgtype}]")
+            print(f"    Accel:  {comp['acc_note']}")
+            print(f"    Gyro:   {comp['gyro_note']}")
+            print(f"    Status: {col}{comp['overall'].upper().replace('_', ' ')}{reset}")
 
     # ---- Deserialization warnings ----
     warn_topics = [
@@ -1445,7 +1528,7 @@ def main():
                 print(f"         Use --sequence to audit them all.\n")
 
     # --- Audit each bag ---
-    all_reports: List[Tuple[str, Dict[str, TopicStats], List[PairScore]]] = []
+    all_reports: List[Tuple[str, Dict[str, TopicStats], List[PairScore], Optional[str]]] = []
     for bag_file in sequence:
         label = bag_file.name if len(sequence) > 1 else str(bag_file)
         if len(sequence) > 1:
@@ -1455,7 +1538,7 @@ def main():
 
         cur_is_ros1 = bag_file.suffix == ".bag"
         print(f"Sampling up to {args.max_msgs} messages per topic ...")
-        all_topics = _sample_bag(bag_file, args.max_msgs, cur_is_ros1)
+        all_topics, mandeye_info = _sample_bag(bag_file, args.max_msgs, cur_is_ros1)
 
         pc_topics = [
             s for s in all_topics.values()
@@ -1475,14 +1558,16 @@ def main():
             for imu in imu_topics:
                 pairs.append(score_pair(pc, imu))
 
-        print_report(label, all_topics, pairs, args.top, args.verbose)
-        all_reports.append((str(bag_file), all_topics, pairs))
+            print_report(label, all_topics, pairs, args.top, args.verbose,
+                     mandeye_info=mandeye_info)
+        all_reports.append((str(bag_file), all_topics, pairs, mandeye_info))
 
     # --- JSON export (first / only bag, or combined) ---
     if args.json:
-        bag_label, topics, pairs = all_reports[0]
+        bag_label, topics, pairs, mandeye_info_j = all_reports[0]
         _write_json(args.json, bag_label, topics, pairs,
-                     seq_infos=seq_infos if len(sequence) > 1 else None)
+                    seq_infos=seq_infos if len(sequence) > 1 else None,
+                    mandeye_info=mandeye_info_j)
 
 
 # ============================================================================
@@ -1525,6 +1610,8 @@ def _topic_to_dict(s: TopicStats) -> Dict:
         if s.gyro_magnitudes:
             d["gyro_mean_raw"] = float(np.mean(s.gyro_magnitudes))
             d["gyro_mean_si"] = float(np.mean(s.gyro_magnitudes)) * s.gyro_scale
+        from mandeye_bag_common import rep145_compliance as _r145
+        d["rep145"] = _r145(s.acc_unit, s.gyro_unit, s.msgtype)
     if _is_pc_type(s.msgtype):
         if s.point_counts:
             d["pts_per_msg_avg"] = float(np.mean(s.point_counts))
@@ -1558,6 +1645,7 @@ def _write_json(
     all_topics: Dict[str, TopicStats],
     pairs: List[PairScore],
     seq_infos: Optional[List[SequenceInfo]] = None,
+    mandeye_info: Optional[str] = None,
 ) -> None:
     """Write the full audit results to a JSON file."""
     relevant = {
@@ -1567,8 +1655,13 @@ def _write_json(
     pairs_sorted = sorted(pairs, key=lambda p: p.total, reverse=True)
 
     data: Dict[str, Any] = {
-        "audit_version": "0.8",
+        "audit_version": "0.9",
         "bag": bag_path,
+        "rep145_refs": {
+            "rep103": "https://www.ros.org/reps/rep-0103.html",
+            "rep145": "https://www.ros.org/reps/rep-0145.html",
+            "standard": "sensor_msgs/Imu: linear_acceleration in m/s², angular_velocity in rad/s",
+        },
         "topics": [
             {"topic": s.topic, "msgtype": s.msgtype, "msgcount": s.msgcount}
             for s in sorted(all_topics.values(), key=lambda x: x.topic)
@@ -1579,6 +1672,14 @@ def _write_json(
         ],
         "pairs": [_pair_to_dict(p) for p in pairs_sorted],
     }
+
+    # Add /mandeye/dataset_info metadata if found in bag
+    if mandeye_info:
+        try:
+            import json as _json
+            data["mandeye_dataset_info"] = _json.loads(mandeye_info)
+        except Exception:
+            data["mandeye_dataset_info"] = mandeye_info
 
     # Add sequence info if present
     if seq_infos and len(seq_infos) > 1:
