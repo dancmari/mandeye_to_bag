@@ -17,6 +17,12 @@ Options:
   --gyro-conv <conv>    Gyroscope conversion:
                           rad2deg : rad/s  → deg/s   (× 180/π)
                           deg2rad : deg/s  → rad/s   (× π/180)
+  --time-conv <conv>    Timestamp conversion preset:
+                          ns2sec  : ns    → s     (×  1e-9)
+                          sec2ns  : s     → ns    (×  1e9)
+                          ms2sec  : ms    → s     (×  1e-3)
+                          sec2ms  : s     → ms    (×  1e3)
+  --time-factor <X>     Custom timestamp multiplication factor (any float)
   --pattern <glob>      File glob to match (default: imu_*.csv)
   --backup              Save original files as <file>.bak before modifying
   --dry-run             Print what would change without writing anything
@@ -55,6 +61,12 @@ _ACC_CONV: dict[str, tuple[str, str, float]] = {
 _GYRO_CONV: dict[str, tuple[str, str, float]] = {
     "rad2deg": ("rad/s", "deg/s", 180.0 / math.pi),
     "deg2rad": ("deg/s", "rad/s", math.pi / 180.0),
+}
+_TIME_CONV: dict[str, tuple[str, str, float]] = {
+    "ns2sec": ("ns",  "s",   1e-9),
+    "sec2ns": ("s",   "ns",  1e9),
+    "ms2sec": ("ms",  "s",   1e-3),
+    "sec2ms": ("s",   "ms",  1e3),
 }
 
 
@@ -110,11 +122,12 @@ def _apply_factors(
     acc_factor: Optional[float],
     gyro_factor: Optional[float],
     header: Optional[str],
+    time_factor: Optional[float] = None,
 ) -> list[list[str]]:
-    """Apply conversion factors to gyro (cols 1-3) and/or acc (cols 4-6).
+    """Apply conversion factors to timestamp (col 0), gyro (cols 1-3), and/or acc (cols 4-6).
 
     Column layout (0-based):
-      0         : timestamp (ns)
+      0         : timestamp (rescaled when time_factor is given)
       1, 2, 3   : gyroX, gyroY, gyroZ
       4, 5, 6   : accX,  accY,  accZ
       7         : imuId  (optional)
@@ -134,6 +147,8 @@ def _apply_factors(
     result: list[list[str]] = []
     for row in rows:
         new_row = list(row)
+        if time_factor is not None and len(new_row) > 0:
+            new_row[0] = repr(float(new_row[0]) * time_factor)
         if gyro_factor is not None:
             for i in gyro_cols:
                 if i < len(new_row):
@@ -165,6 +180,7 @@ def process_file(
     gyro_factor: Optional[float],
     backup: bool,
     dry_run: bool,
+    time_factor: Optional[float] = None,
 ) -> dict:
     """Process a single CSV file.  Returns a small stats dict."""
     text = path.read_text(encoding="utf-8")
@@ -174,11 +190,13 @@ def process_file(
         print(f"  {path.name}: empty / no data rows — skipped")
         return {"file": path.name, "rows": 0, "skipped": True}
 
-    new_rows = _apply_factors(rows, acc_factor, gyro_factor, header)
+    new_rows = _apply_factors(rows, acc_factor, gyro_factor, header, time_factor)
 
     # Build a short preview (first data row before → after)
     def _fmt(row: list[str]) -> str:
-        return "  [" + ", ".join(f"{float(v):.6g}" for v in row[1:7]) + "]"
+        ts = f"ts={float(row[0]):.6g}"
+        vals = ", ".join(f"{float(v):.6g}" for v in row[1:7])
+        return f"  [{ts} | {vals}]"
 
     print(f"  {path.name}  ({len(rows)} rows)")
     print(f"    before: {_fmt(rows[0])}")
@@ -213,6 +231,11 @@ Conversion keys:
                ms2g   : m/s²  → g      (divide  by 9.80665)
   --gyro-conv  rad2deg: rad/s → deg/s  (multiply by 180/π ≈ 57.296)
                deg2rad: deg/s → rad/s  (multiply by π/180 ≈ 0.01745)
+  --time-conv  ns2sec : ns  → s     (×  1e-9)
+               sec2ns : s   → ns    (×  1e9)
+               ms2sec : ms  → s     (×  1e-3)
+               sec2ms : s   → ms    (×  1e3)
+  --time-factor <X> : custom multiplier applied to timestamp column
 
 Examples:
   # Dry-run preview — nothing is written:
@@ -223,6 +246,12 @@ Examples:
 
   # Only fix gyro, leave acc untouched:
   python mandeye_imu_rescale.py --dir ./extracted --gyro-conv rad2deg --backup
+
+  # Convert timestamps from nanoseconds to seconds:
+  python mandeye_imu_rescale.py --dir ./extracted --time-conv ns2sec --backup
+
+  # Custom timestamp factor (e.g. ms → s):
+  python mandeye_imu_rescale.py --dir ./extracted --time-factor 0.001 --backup""",
 """,
     )
     parser.add_argument("--dir", required=True, metavar="PATH",
@@ -231,6 +260,15 @@ Examples:
                         help="Accelerometer conversion (omit = no change)")
     parser.add_argument("--gyro-conv", choices=list(_GYRO_CONV), default=None,
                         help="Gyroscope conversion (omit = no change)")
+    time_group = parser.add_mutually_exclusive_group()
+    time_group.add_argument(
+        "--time-conv", choices=list(_TIME_CONV), default=None,
+        help="Timestamp conversion preset: ns2sec, sec2ns, ms2sec, sec2ms",
+    )
+    time_group.add_argument(
+        "--time-factor", type=float, default=None, metavar="X",
+        help="Custom timestamp multiplication factor (mutually exclusive with --time-conv)",
+    )
     parser.add_argument("--pattern", default="imu_*.csv", metavar="GLOB",
                         help="File glob pattern (default: imu_*.csv)")
     parser.add_argument("--backup", action="store_true",
@@ -239,8 +277,8 @@ Examples:
                         help="Show changes without writing files")
     args = parser.parse_args()
 
-    if args.acc_conv is None and args.gyro_conv is None:
-        parser.error("Nothing to do: specify at least --acc-conv or --gyro-conv.")
+    if args.acc_conv is None and args.gyro_conv is None and args.time_conv is None and args.time_factor is None:
+        parser.error("Nothing to do: specify at least one of --acc-conv, --gyro-conv, --time-conv, --time-factor.")
 
     work_dir = Path(args.dir)
     if not work_dir.is_dir():
@@ -266,6 +304,16 @@ Examples:
     else:
         print("Gyro:   no conversion")
 
+    time_factor: Optional[float] = None
+    if args.time_conv:
+        src, dst, time_factor = _TIME_CONV[args.time_conv]
+        print(f"Time:   {src} → {dst}  (× {time_factor:.6g})")
+    elif args.time_factor is not None:
+        time_factor = args.time_factor
+        print(f"Time:   custom factor × {time_factor:.6g}")
+    else:
+        print("Time:   no conversion")
+
     if args.dry_run:
         print("Mode:   DRY-RUN (files will NOT be modified)\n")
     elif args.backup:
@@ -277,7 +325,8 @@ Examples:
     total_files = 0
     for f in csv_files:
         stats = process_file(f, acc_factor, gyro_factor,
-                             backup=args.backup, dry_run=args.dry_run)
+                             backup=args.backup, dry_run=args.dry_run,
+                             time_factor=time_factor)
         total_rows  += stats.get("rows", 0)
         total_files += 1
 

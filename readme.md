@@ -80,31 +80,89 @@ pip install Pillow
 | `mandeye_bag_audit.py` | Audit a ROS bag: score every (PointCloud, IMU) pair, detect units, export JSON |
 | `mandeye_bag_convert.py` | Convert between MandEye datasets and ROS1/ROS2 bag files |
 | `mandeye_bag_extract.py` | Extract selected topics to a filtered bag and/or CSV/LAZ/image files |
-| `mandeye_bag_common.py` | Shared library used by the three scripts above |
+| `mandeye_imu_rescale.py` | Post-extraction IMU unit fix — rescale acc / gyro / timestamp in CSV files |
+| `mandeye_bag_common.py` | Shared library used by the scripts above |
+
+### MandEye file format
+
+A MandEye / HDMapping dataset folder contains chunks of equal duration:
+
+| File | Content | Units |
+|------|---------|-------|
+| `pointcloud_NNNN.laz` | LiDAR points: x, y, z, intensity, GPS time | m (xyz), s (time) |
+| `imu_NNNN.csv` | IMU rows: `timestamp gyroX gyroY gyroZ accX accY accZ imuId` | ns (timestamp), **deg/s** (gyro), **g** (accel) |
+| `lidarNNNN.sn` | Serial number info: `imuId serialNumber` | — |
+
+> **Note:** When converting from a ROS bag the tool targets **g** for accelerometer
+> and **deg/s** for gyroscope.  Use `--acc_unit` / `--gyro_unit` to tell the
+> converter what unit is stored in the bag so it applies the right factor.
+> If no unit flags are given, auto-detection runs but **no conversion** is
+> applied — the informational message will tell you what was detected.
 
 ### Quick examples
 
 ```shell
+# --- Audit ----------------------------------------------------------------
+
 # Audit a bag (human report + machine-readable JSON):
 python mandeye_bag_audit.py recording.bag --json audit.json
 
-# Convert ROS1 bag → MandEye (auto topics + units from audit):
-python mandeye_bag_convert.py recording.bag output ros1-to-hdmapping --audit-json audit.json
+# --- Convert bag → MandEye ------------------------------------------------
 
-# Convert MandEye → ROS1 bag:
-python mandeye_bag_convert.py ./my_dataset ./output.bag hdmapping-to-ros1
+# Explicit units (recommended):
+python mandeye_bag_convert.py recording.bag output ros1-to-hdmapping \
+    --acc_unit m/s2 --gyro_unit rad/s
 
-# Convert MandEye → ROS2 bag:
-python mandeye_bag_convert.py ./my_dataset ./output_ros2 hdmapping-to-ros2
+# Auto topics + units suggested by audit JSON:
+python mandeye_bag_convert.py recording.bag output ros1-to-hdmapping \
+    --audit-json audit.json
 
-# Extract specific topics to LAZ / CSV / images:
+# ROS2 bag → MandEye:
+python mandeye_bag_convert.py recording_ros2/ output ros2-to-hdmapping \
+    --acc_unit m/s2 --gyro_unit rad/s
+
+# --- Convert MandEye → bag ------------------------------------------------
+
+python mandeye_bag_convert.py ./my_dataset ./output.bag    hdmapping-to-ros1
+python mandeye_bag_convert.py ./my_dataset ./output_ros2   hdmapping-to-ros2
+
+# --- Multi-volume sequence ------------------------------------------------
+
+python mandeye_bag_convert.py recording_0.bag output ros1-to-hdmapping --sequence
+
+# --- Extract topics -------------------------------------------------------
+
 python mandeye_bag_extract.py recording.bag -o out --topics "/livox/*" --format csv
-
-# List topics in a bag:
 python mandeye_bag_extract.py recording.bag --list
 
-# Multi-volume sequence:
-python mandeye_bag_convert.py recording_0.bag output ros1-to-hdmapping --sequence
+# --- Fix IMU units in already-extracted CSV files -------------------------
+
+# Preview only (nothing written):
+python mandeye_imu_rescale.py --dir ./output --acc-conv ms2g --gyro-conv rad2deg --dry-run
+
+# Apply in-place with .bak backup:
+python mandeye_imu_rescale.py --dir ./output --acc-conv ms2g --gyro-conv rad2deg --backup
+
+# Convert timestamps from nanoseconds to seconds:
+python mandeye_imu_rescale.py --dir ./output --time-conv ns2sec --backup
+
+# Custom timestamp factor:
+python mandeye_imu_rescale.py --dir ./output --time-factor 1e-9 --backup
 ```
 
 Run any script with `--help` for the full list of options.
+
+### IMU unit handling (bag → MandEye)
+
+```
+Priority order for unit selection:
+  1. --acc_unit / --gyro_unit   explicit CLI arguments
+  2. --audit-json               units detected by mandeye_bag_audit.py
+  3. Auto-detection             samples first 500 IMU messages;
+                                uses stationary-period analysis (|acc| ≈ 1 g)
+                                when available.  Detection is informational only
+                                — no conversion is applied automatically.
+```
+
+If the wrong units slipped through into the extracted CSVs, use
+`mandeye_imu_rescale.py` to fix them without re-running the full extraction.

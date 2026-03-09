@@ -386,6 +386,13 @@ def hdmapping_to_ros1(
     files_laz = sorted(input_path.glob("*.laz"))
 
     print(f"  Found {len(files_imu)} IMU files, {len(files_laz)} LAZ files")
+    print()
+    print(f"  Input file layout (MandEye / HDMapping):")
+    print(f"    *.laz   LiDAR chunks   (x,y,z [m]; intensity; GPS time [s])")
+    print(f"    *.csv   IMU chunks     (timestamp [ns] | gyroX,Y,Z | accX,Y,Z | imuId)")
+    print(f"            assumed units:  Accel [g]   |   Gyro [deg/s]")
+    print(f"    *.sn    serial info    (imuId  serialNumber)")
+    print()
 
     with Writer1(output_bag) as writer:
         imu_conn = writer.add_connection(imu_topic, Imu.__msgtype__)
@@ -436,6 +443,13 @@ def hdmapping_to_ros1(
 
         print(f"  Wrote {total_pc} PointCloud2 messages")
 
+    print()
+    print(f"  \u2500\u2500 Conversion summary \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+    print(f"  Output:  {output_bag}")
+    print(f"  Topics:  IMU \u2192 {imu_topic}   |   PC \u2192 {pc_topic}")
+    print(f"  Written: {total_imu} IMU messages   |   {total_pc} PointCloud2 messages")
+    print(f"  IMU units in CSV:  Accel [g]  |  Gyro [deg/s]  (values written as-is to bag)")
+    print()
     print("Done!")
 
 
@@ -463,6 +477,13 @@ def hdmapping_to_ros2(
         files_laz = files_laz_all
 
     print(f"  Found {len(files_imu)} IMU files, {len(files_laz)} LAZ files")
+    print()
+    print(f"  Input file layout (MandEye / HDMapping):")
+    print(f"    *.laz   LiDAR chunks   (x,y,z [m]; intensity; GPS time [s])")
+    print(f"    *.csv   IMU chunks     (timestamp [ns] | gyroX,Y,Z | accX,Y,Z | imuId)")
+    print(f"            assumed units:  Accel [g]   |   Gyro [deg/s]")
+    print(f"    *.sn    serial info    (imuId  serialNumber)")
+    print()
 
     with Writer2(output_bag) as writer:
         imu_conn = writer.add_connection(
@@ -522,6 +543,13 @@ def hdmapping_to_ros2(
 
         print(f"  Wrote {total_pc} PointCloud2 messages")
 
+    print()
+    print(f"  \u2500\u2500 Conversion summary \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+    print(f"  Output:  {output_bag}")
+    print(f"  Topics:  IMU \u2192 {imu_topic}   |   PC \u2192 {pc_topic}")
+    print(f"  Written: {total_imu} IMU messages   |   {total_pc} PointCloud2 messages")
+    print(f"  IMU units in CSV:  Accel [g]  |  Gyro [deg/s]  (values written as-is to bag)")
+    print()
     print("Done!")
 
 
@@ -564,6 +592,13 @@ def _bag_to_hdmapping(
     print(f"  Chunk len: {chunk_len}s")
     if start_index:
         print(f"  Start index: {start_index}")
+    print()
+    print(f"  Output file layout (MandEye / HDMapping):")
+    print(f"    pointcloud_NNNN.laz   LiDAR chunk    (x,y,z [m]; intensity; GPS time [s])")
+    print(f"    imu_NNNN.csv          IMU chunk       (timestamp [ns] | gyroX,Y,Z | accX,Y,Z | imuId)")
+    print(f"    lidarNNNN.sn          serial info     (imuId  serialNumber)")
+    print(f"  IMU export targets:  Accel \u2192 g  (1 g = 9.80665 m/s\u00b2)   |   Gyro \u2192 deg/s")
+    print()
 
     os.makedirs(output_dir, exist_ok=True)
 
@@ -774,6 +809,16 @@ def _bag_to_hdmapping(
         "warnings": warnings,
     }
     print("Done!")
+    print()
+    print(f"  \u2500\u2500 Conversion summary \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500")
+    print(f"  Output:  {output_dir}")
+    print(f"  Chunks:  {n_chunks}  (files {start_index:04d}\u2013{count:04d})")
+    print(f"  Points:  {total_pts}")
+    print(f"  IMU:     {total_imu} samples")
+    print(f"  Accel:   {acc_unit or '(not detected)'}  (\u00d7{acc_factor:.6g} \u2192 g)")
+    print(f"  Gyro:    {gyro_unit or '(not detected)'}  (\u00d7{gyro_factor:.6g} \u2192 deg/s)")
+    print(f"  Elapsed: {elapsed:.1f}s")
+    print()
     return report
 
 
