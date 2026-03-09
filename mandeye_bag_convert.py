@@ -695,6 +695,7 @@ def _bag_to_hdmapping(
         # ── Pass 0: connection scan (no deserialization) ───────────────────
         has_custom_msg = False
         has_info_topic = False
+        _total_msgs_hint = 0   # best-effort total for progress bar
         with ReaderCls(bag_path) as reader:
             print("  Topics in bag:")
             for c in reader.connections:
@@ -705,6 +706,8 @@ def _bag_to_hdmapping(
                     has_custom_msg = True
                 if c.topic == _MANDEYE_INFO_TOPIC:
                     has_info_topic = True
+                if cnt is not None and c.topic in (pc_topic, imu_topic):
+                    _total_msgs_hint += cnt
 
         # ── Pass 1: unified pre-pass ───────────────────────────────────────
         # Collects in a single sweep, stopping as soon as all sub-goals done:
@@ -834,10 +837,39 @@ def _bag_to_hdmapping(
             frame_rate_detected = True
 
         # --- Main data extraction pass ---
+        _prog_msgs   = 0          # messages seen (pc + imu only)
+        _prog_t      = time.monotonic()
+        _prog_last   = _prog_t    # time of last progress print
+        _PROG_INTERVAL = 2.0      # seconds between progress updates
+
+        def _prog_print(final: bool = False) -> None:
+            elapsed_now = time.monotonic() - t0
+            if _total_msgs_hint > 0:
+                pct = min(100.0, 100.0 * _prog_msgs / _total_msgs_hint)
+                bar_w = 20
+                filled = int(bar_w * pct / 100)
+                bar = "█" * filled + "░" * (bar_w - filled)
+                pct_str = f"{pct:5.1f}%"
+            else:
+                bar = "░" * 20
+                pct_str = "  ??? "
+            chunk_now = count - start_index
+            rate = total_pts / elapsed_now if elapsed_now > 0 else 0
+            line = (
+                f"\r  [{bar}] {pct_str}  chunk {chunk_now:04d}"
+                f"  pts {total_pts:>7,}  imu {total_imu:>6,}"
+                f"  {elapsed_now:5.1f}s  {rate:,.0f} pts/s   "
+            )
+            end = "\n" if final else ""
+            print(line, end=end, flush=True)
+
         with ReaderCls(bag_path) as reader:
           try:
             for conn, timestamp, rawdata in reader.messages():
                 msg_time_sec = timestamp / 1e9
+
+                if conn.topic in (imu_topic, pc_topic):
+                    _prog_msgs += 1
 
                 if conn.topic == imu_topic and "Imu" in conn.msgtype:
                     msg = deser_fn(rawdata, conn.msgtype)
@@ -888,13 +920,22 @@ def _bag_to_hdmapping(
                     buffer_imu.clear()
                     last_save_ts = msg_time_sec
                     count += 1
+                    _prog_print()
+
+                _now = time.monotonic()
+                if _now - _prog_last >= _PROG_INTERVAL:
+                    _prog_print()
+                    _prog_last = _now
 
           except Exception as exc:
+            _prog_print(final=True)
             w = f"Bag read error on {bag_path.name}: {exc}"
             warnings.append(w)
             print(f"  WARNING: Bag read error (truncated/corrupt?): {exc}",
                   file=sys.stderr)
             print("           Saving data read so far ...", file=sys.stderr)
+        else:
+            _prog_print(final=True)   # normal completion — print final line
 
     if buffer_pc or buffer_imu:
         _save_chunk(output_dir, count, buffer_pc, buffer_imu,
@@ -1227,17 +1268,37 @@ Output report:
 
     # --list_topics mode: just print bag contents and exit
     if args.list_topics:
+        import ctypes as _ct
+        try:
+            _k32 = _ct.windll.kernel32  # type: ignore[attr-defined]
+            _h = _k32.GetStdHandle(-11)
+            _m = _ct.c_ulong(0)
+            _k32.GetConsoleMode(_h, _ct.byref(_m))
+            _k32.SetConsoleMode(_h, _m.value | 0x0004)
+        except Exception:
+            pass
+
         p = Path(args.input)
-        if p.suffix == ".bag":
-            print(f"Topics in ROS1 bag: {args.input}")
-            with Reader1(p) as reader:
-                for c in reader.connections:
-                    print(f"  {c.topic}  [{c.msgtype}]  ({c.msgcount} msgs)")
-        else:
-            print(f"Topics in ROS2 bag: {args.input}")
-            with Reader2(args.input) as reader:
-                for c in reader.connections:
-                    print(f"  {c.topic}  [{c.msgtype}]")
+        is_ros1 = p.suffix == ".bag"
+        ReaderCls = Reader1 if is_ros1 else Reader2
+        fmt = "ROS1" if is_ros1 else "ROS2"
+        print(f"\nTopics in {fmt} bag: {args.input}\n")
+        print(f"  {'TOPIC':<40}  {'TYPE':<45}  {'MSGS':>8}")
+        print(f"  {'─'*40}  {'─'*45}  {'─'*8}")
+        with ReaderCls(p if is_ros1 else args.input) as reader:
+            for c in reader.connections:
+                cnt = getattr(c, "msgcount", None)
+                cnt_str = f"{cnt:>8}" if cnt is not None else "       ?"
+                # Annotate known topics
+                tag = ""
+                if c.topic == args.imu_topic:
+                    tag = "  \033[32m← IMU\033[0m"
+                elif c.topic == args.pointcloud_topic:
+                    tag = "  \033[36m← PC\033[0m"
+                elif c.topic == _MANDEYE_INFO_TOPIC:
+                    tag = "  \033[90m← metadata\033[0m"
+                print(f"  {c.topic:<40}  {c.msgtype:<45}  {cnt_str}{tag}")
+        print()
         sys.exit(0)
 
     # Resolve a unique output path so we never overwrite existing data
