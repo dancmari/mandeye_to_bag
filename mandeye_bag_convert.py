@@ -934,7 +934,7 @@ def _bag_to_hdmapping(
             print(f"  WARNING: Bag read error (truncated/corrupt?): {exc}",
                   file=sys.stderr)
             print("           Saving data read so far ...", file=sys.stderr)
-        else:
+          else:
             _prog_print(final=True)   # normal completion — print final line
 
     if buffer_pc or buffer_imu:
