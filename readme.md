@@ -76,8 +76,7 @@ pip install Pillow
 ### Scripts
 
 | Script | Purpose |
-|--------|---------|
-| `mandeye_bag_audit.py` | Audit a ROS bag: score every (PointCloud, IMU) pair, detect units, export JSON |
+|--------|---------|| `mandeye_check_deps.py` | Validate Python environment and installed dependencies || `mandeye_bag_audit.py` | Audit a ROS bag: score every (PointCloud, IMU) pair, detect units, export JSON |
 | `mandeye_bag_convert.py` | Convert between MandEye datasets and ROS1/ROS2 bag files |
 | `mandeye_bag_extract.py` | Extract selected topics to a filtered bag and/or CSV/LAZ/image files |
 | `mandeye_imu_rescale.py` | Post-extraction IMU unit fix — rescale acc / gyro / timestamp in CSV files |
@@ -102,6 +101,12 @@ A MandEye / HDMapping dataset folder contains chunks of equal duration:
 ### Quick examples
 
 ```shell
+# --- Check environment first (recommended before first use) ---------------
+
+python mandeye_check_deps.py
+# auto-install missing required packages:
+python mandeye_check_deps.py --install-missing
+
 # --- Audit ----------------------------------------------------------------
 
 # Audit a bag (human report + machine-readable JSON):
